@@ -1251,7 +1251,7 @@ def main() -> None:
     with c_foto:
         st.markdown('<div class="gps-player-card">', unsafe_allow_html=True)
         if foto_path:
-            st.image(foto_path, use_column_width=True)
+            st.image(foto_path, use_container_width=True)
         st.markdown(
             f"""
             <div class="gps-player-name">{jugador}</div>

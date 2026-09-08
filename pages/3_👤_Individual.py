@@ -141,7 +141,7 @@ def main():
         with col_foto:
             from utils.visualizations import obtener_foto_jugador
             foto_path = obtener_foto_jugador(jugador_seleccionado)
-            st.image(foto_path, use_column_width=True)
+            st.image(foto_path, use_container_width=True)
         
         # Detectar posición del jugador desde plantilla
         try:
