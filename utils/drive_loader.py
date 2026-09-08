@@ -231,13 +231,19 @@ def cargar_plantilla_desde_drive(equipo='europa'):
     archivo = archivos[0]
     
     try:
-        # Descargar temporalmente
+        # Descargar temporalmente. Importante: cerrar el archivo antes de leerlo,
+        # porque Windows bloquea ficheros abiertos por NamedTemporaryFile.
         suffix = '.xlsx' if str(archivo.get('title', '')).lower().endswith('.xlsx') else '.xls'
         with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp_file:
-            archivo.GetContentFile(tmp_file.name)
-            df_plantilla = pd.read_excel(tmp_file.name)
-            os.unlink(tmp_file.name)
-        
+            tmp_path = tmp_file.name
+
+        archivo.GetContentFile(tmp_path)
+        try:
+            df_plantilla = pd.read_excel(tmp_path)
+        finally:
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+
         st.success(f"✅ Plantilla cargada desde Drive: {archivo['title']}")
         return df_plantilla
         
@@ -365,24 +371,28 @@ def cargar_usuarios_desde_drive():
     
     try:
         with tempfile.NamedTemporaryFile(suffix='.csv', delete=False) as tmp_file:
-            archivo.GetContentFile(tmp_file.name)
-            
+            tmp_path = tmp_file.name
+
+        archivo.GetContentFile(tmp_path)
+        try:
             # Leer CSV con detección automática de separador y sin BOM
             df_usuarios = pd.read_csv(
-                tmp_file.name, 
+                tmp_path,
                 encoding='utf-8-sig',  # Elimina BOM automáticamente
                 sep=None,              # Detecta automáticamente , o ;
                 engine='python'        # Necesario para sep=None
             )
-            os.unlink(tmp_file.name)
-        
+        finally:
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+
         # Validar columnas requeridas
         columnas_requeridas = ['nombre', 'usuario', 'contraseña', 'rol']
         if not all(col in df_usuarios.columns for col in columnas_requeridas):
             st.error(f"❌ El archivo de usuarios debe tener las columnas: {columnas_requeridas}")
             st.error(f"❌ Pero tiene: {df_usuarios.columns.tolist()}")
             return None
-        
+
         return df_usuarios
         
     except Exception as e:
