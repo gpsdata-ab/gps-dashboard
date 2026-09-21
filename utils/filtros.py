@@ -40,25 +40,29 @@ def filtrar_solo_partidos(df):
     return df[df.apply(es_partido, axis=1)].copy()
 
 
-def render_filtro_partidos(df, titulo="🎯 Filtros de Partido"):
+def render_filtro_partidos(
+    df,
+    titulo="🎯 Filtros de Partido",
+    incluir_rango_fechas=True,
+):
     """
     Renderiza el filtro de partidos independiente para cada página
     ...
     """
     
-    # CRÍTICO: Inicializar fechas si no existen
-    if 'fecha_desde' not in st.session_state or st.session_state.fecha_desde is None:
-        st.session_state.fecha_desde = pd.to_datetime(df['date'].min())
-    if 'fecha_hasta' not in st.session_state or st.session_state.fecha_hasta is None:
-        st.session_state.fecha_hasta = pd.to_datetime(df['date'].max())
-    
-    # Obtener fechas del session_state (ya son datetime)
-    fecha_desde = st.session_state.fecha_desde
-    fecha_hasta = st.session_state.fecha_hasta
-    
-    # Filtrar por rango general
-    
-    df_rango = filtrar_por_fechas(df, fecha_desde, fecha_hasta)
+    if incluir_rango_fechas:
+        # Respetar el rango global solo en las páginas que lo habilitan.
+        if 'fecha_desde' not in st.session_state or st.session_state.fecha_desde is None:
+            st.session_state.fecha_desde = pd.to_datetime(df['date'].min())
+        if 'fecha_hasta' not in st.session_state or st.session_state.fecha_hasta is None:
+            st.session_state.fecha_hasta = pd.to_datetime(df['date'].max())
+        df_rango = filtrar_por_fechas(
+            df,
+            st.session_state.fecha_desde,
+            st.session_state.fecha_hasta,
+        )
+    else:
+        df_rango = df.copy()
     
     # Obtener fechas disponibles
     fechas_disponibles = sorted(df_rango['date'].unique())
@@ -78,7 +82,11 @@ def render_filtro_partidos(df, titulo="🎯 Filtros de Partido"):
     with col1:
         modo_partido = st.radio(
             "Modo de selección:",
-            options=['Partido Específico', 'Últimos N partidos', 'Rango de Fechas'],
+            options=(
+                ['Partido Específico', 'Últimos N partidos', 'Rango de Fechas']
+                if incluir_rango_fechas
+                else ['Partido Específico', 'Últimos N partidos']
+            ),
             key='modo_partido_filtro'
         )
     

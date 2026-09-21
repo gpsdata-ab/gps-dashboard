@@ -2,7 +2,7 @@
 Módulo de utilidades para la aplicación CE Europa GPS
 """
 
-from .data_loader import validar_columnas
+from .data_loader import cargar_datos_csv, validar_columnas, mapear_datos_con_plantilla
 from .drive_loader import cargar_datos_desde_drive, cargar_plantilla_desde_drive, obtener_info_dataset
 from .data_processor import (
     procesar_datos, 
@@ -52,6 +52,8 @@ from .filtros import render_filtro_partidos
 __all__ = [
     # data_loader
     'validar_columnas',
+    'cargar_datos_csv',
+    'mapear_datos_con_plantilla',
     'obtener_info_dataset',
     # drive_loader
     'cargar_datos_desde_drive',
