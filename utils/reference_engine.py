@@ -1,6 +1,7 @@
 """Reference and microcycle calculations for GPS workloads."""
 
 from collections.abc import Callable
+from datetime import date, datetime, timedelta
 
 import pandas as pd
 
@@ -9,14 +10,55 @@ from .normalization import get_positional_average, normalize_to_75_min
 
 def get_microcycle_structure(num_sessions: int) -> list[str]:
     """Return the standard match-day labels for a microcycle length."""
-    structures = {
-        6: ["MD+1", "MD-5", "MD-4", "MD-3", "MD-2", "MD-1"],
-        5: ["MD+1", "MD-4", "MD-3", "MD-2", "MD-1"],
-        4: ["MD+1", "MD-3", "MD-2", "MD-1"],
-        3: ["MD+1", "MD-2", "MD-1"],
-        2: ["MD+1", "MD-1"],
+    if num_sessions < 1:
+        return []
+    return ["MD+1"] + [f"MD-{i}" for i in range(num_sessions, 0, -1)]
+
+
+def map_microcycle_dates(
+    start_date: date | datetime | str,
+    sessions: list[str],
+) -> dict[str, date]:
+    """Map sessions to consecutive calendar dates starting at MD+1."""
+    selected_date = pd.Timestamp(start_date).date()
+    return {
+        session: selected_date + timedelta(days=offset)
+        for offset, session in enumerate(sessions)
     }
-    return structures.get(num_sessions, []).copy()
+
+
+def aggregate_actual_loads(
+    df: pd.DataFrame,
+    players: pd.Series,
+    metric: str,
+    session_dates: dict[str, date],
+) -> pd.DataFrame:
+    """Sum a metric per player for the exact date mapped to each session.
+
+    Missing dates and missing player records are represented by ``0.0``.
+    """
+    result = pd.DataFrame({"player": players.drop_duplicates().tolist()})
+    if result.empty:
+        return result
+
+    for session, session_date in session_dates.items():
+        result[f"Actual {session}"] = 0.0
+
+    if "player" not in df.columns or "date" not in df.columns or metric not in df.columns:
+        return result
+
+    source = df[["player", "date", metric]].copy()
+    source["date"] = pd.to_datetime(source["date"], errors="coerce").dt.date
+    source[metric] = pd.to_numeric(source[metric], errors="coerce").fillna(0.0)
+    source = source[source["player"].notna()]
+
+    for session, session_date in session_dates.items():
+        matching = source[source["date"] == session_date]
+        totals = matching.groupby("player", dropna=False)[metric].sum()
+        result[f"Actual {session}"] = (
+            result["player"].map(totals).fillna(0.0).astype(float)
+        )
+    return result
 
 
 def _get_statistic(stat_type: str) -> Callable[[pd.Series], float]:

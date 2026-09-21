@@ -1,6 +1,7 @@
 """Bloque A: prescription of the weekly training load."""
 
 import sys
+from datetime import date, timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -11,7 +12,12 @@ sys.path.insert(0, str(ROOT_DIR))
 
 from config import LAYOUT, PAGE_ICON, PAGE_TITLE
 from utils import render_sidebar
-from utils.reference_engine import calculate_references, get_microcycle_structure
+from utils.reference_engine import (
+    aggregate_actual_loads,
+    calculate_references,
+    get_microcycle_structure,
+    map_microcycle_dates,
+)
 
 
 METRIC_OPTIONS = {
@@ -86,6 +92,7 @@ def render_allocation_controls(sessions: list[str]) -> dict[str, int]:
     """Render one percentage input per session and return current values."""
     defaults = default_allocations(sessions)
     values: dict[str, int] = {}
+    session_key = "_".join(sessions)
     columns = st.columns(len(sessions))
     for column, session in zip(columns, sessions):
         with column:
@@ -95,7 +102,7 @@ def render_allocation_controls(sessions: list[str]) -> dict[str, int]:
                 max_value=80,
                 value=int(defaults[session]),
                 step=5,
-                key=f"prescription_allocation_{session}",
+                key=f"prescription_allocation_{session_key}_{session}",
                 help="Porcentaje de la carga semanal asignado a esta sesión.",
             )
     total = sum(values.values())
@@ -153,14 +160,15 @@ def render_semáforo(editor_data: pd.DataFrame) -> None:
 
     cards = []
     for _, row in editor_data.iterrows():
-        target = float(row["Target weekly total"])
-        session_total = float(row["Prescribed weekly load"])
-        ratio = session_total / target if target > 0 else 0.0
+        compliance = float(row["% Cumplimiento"])
+        ratio = compliance / 100
         label, css_class, icon = _status(ratio)
         cards.append(
             f'<div class="status-card {css_class}">'
             f"<strong>{icon} {row['Player']}</strong>"
-            f"<small>{label} · {ratio:.0%} del objetivo</small>"
+            f"<small>{label} · {compliance:.1f}% · "
+            f"GPS {float(row['Carga Real GPS']):.2f} / "
+            f"{float(row['Target Prescrito']):.2f}</small>"
             "</div>"
         )
 
@@ -184,8 +192,18 @@ def main() -> None:
         unsafe_allow_html=True,
     )
 
+    df = st.session_state.get("df_procesado")
+    latest_match_date = None
+    if isinstance(df, pd.DataFrame) and "date" in df.columns:
+        parsed_dates = pd.to_datetime(df["date"], errors="coerce").dropna()
+        if not parsed_dates.empty:
+            latest_match_date = parsed_dates.max().date()
+    default_start_date = latest_match_date or (
+        date.today() - timedelta(days=date.today().weekday())
+    )
+
     st.subheader("Configuración del microciclo")
-    control_columns = st.columns(4)
+    control_columns = st.columns(5)
     with control_columns[0]:
         num_sessions = st.selectbox(
             "Microciclo",
@@ -206,6 +224,13 @@ def main() -> None:
             key="prescription_statistic",
         )
     with control_columns[3]:
+        microcycle_start = st.date_input(
+            "Fecha de inicio del Microciclo (MD+1)",
+            value=default_start_date,
+            key="prescription_microcycle_start",
+            help="La fecha seleccionada se considera MD+1; las sesiones siguientes avanzan un día cada una.",
+        )
+    with control_columns[4]:
         load_multiplier = st.selectbox(
             "Valor de carga",
             options=LOAD_VALUES,
@@ -215,10 +240,17 @@ def main() -> None:
         )
 
     sessions = get_microcycle_structure(num_sessions)
+    session_dates = map_microcycle_dates(microcycle_start, sessions)
+    st.caption(
+        "Calendario: "
+        + " · ".join(
+            f"{session}: {session_dates[session].strftime('%d/%m/%Y')}"
+            for session in sessions
+        )
+    )
     st.subheader("Distribución de la carga por sesión")
     allocations = render_allocation_controls(sessions)
 
-    df = st.session_state.get("df_procesado")
     if not isinstance(df, pd.DataFrame) or df.empty:
         st.info("Carga los datos GPS desde la página principal para calcular las referencias.")
         references = pd.DataFrame(columns=["player", "position", "baseline_target"])
@@ -235,6 +267,13 @@ def main() -> None:
 
     unit = _metric_unit(metric_label)
     editor_rows = []
+    actual_loads = aggregate_actual_loads(
+        df if isinstance(df, pd.DataFrame) else pd.DataFrame(),
+        references["player"],
+        METRIC_OPTIONS[metric_label],
+        session_dates,
+    )
+    actual_by_player = actual_loads.set_index("player").to_dict("index")
     for _, reference in references.iterrows():
         target = float(reference["baseline_target"]) * float(load_multiplier)
         row = {
@@ -248,6 +287,7 @@ def main() -> None:
         editor_rows.append(row)
 
     session_columns = list(allocations)
+    session_key = "_".join(session_columns)
     editor_columns = [
         "Player",
         "Position",
@@ -264,10 +304,14 @@ def main() -> None:
         editor_data,
         hide_index=True,
         use_container_width=True,
-        disabled=["Player", "Position", f"Reference ({unit})"],
+        disabled=[
+            "Player",
+            "Position",
+            f"Reference ({unit})",
+        ],
         column_config={
             "Target weekly total": st.column_config.NumberColumn(
-                "Target weekly total", min_value=0, step=1, format="%.2f"
+                "Target Prescrito", min_value=0, step=1, format="%.2f"
             ),
             **{
                 session: st.column_config.NumberColumn(
@@ -276,14 +320,60 @@ def main() -> None:
                 for session in session_columns
             },
         },
-        key="prescription_editor",
+        key=f"prescription_editor_{session_key}",
     )
 
     if not edited.empty:
         edited = edited.copy()
         edited["Prescribed weekly load"] = edited[session_columns].sum(axis=1)
+        edited["Target Prescrito"] = edited["Prescribed weekly load"].round(2)
+        edited["Carga Real GPS"] = (
+            edited["Player"]
+            .map(
+                {
+                    player: sum(values.values())
+                    for player, values in actual_by_player.items()
+                }
+            )
+            .fillna(0.0)
+            .round(2)
+        )
+        edited["% Cumplimiento"] = (
+            edited["Carga Real GPS"]
+            .div(edited["Target Prescrito"].where(
+                edited["Target Prescrito"].ne(0), float("nan")
+            ))
+            .fillna(0.0)
+            .mul(100)
+            .round(1)
+        )
+        edited["Estado"] = edited["% Cumplimiento"].map(
+            lambda compliance: _status(compliance / 100)[0]
+        )
     else:
         edited["Prescribed weekly load"] = pd.Series(dtype=float)
+        edited["Target Prescrito"] = pd.Series(dtype=float)
+        edited["Carga Real GPS"] = pd.Series(dtype=float)
+        edited["% Cumplimiento"] = pd.Series(dtype=float)
+        edited["Estado"] = pd.Series(dtype=str)
+    summary_columns = [
+        "Player",
+        "Target Prescrito",
+        "Carga Real GPS",
+        "% Cumplimiento",
+        "Estado",
+    ]
+    st.subheader("Resumen de cumplimiento")
+    st.dataframe(
+        edited[summary_columns],
+        hide_index=True,
+        use_container_width=True,
+        column_config={
+            "Target Prescrito": st.column_config.NumberColumn(format="%.2f"),
+            "Carga Real GPS": st.column_config.NumberColumn(format="%.2f"),
+            "% Cumplimiento": st.column_config.NumberColumn(format="%.1f%%"),
+        },
+    )
     render_semáforo(edited)
 
 
