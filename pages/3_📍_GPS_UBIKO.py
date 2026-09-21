@@ -22,8 +22,14 @@ import streamlit as st
 root_dir = Path(__file__).parent.parent
 sys.path.insert(0, str(root_dir))
 
-from config import PAGE_TITLE, PAGE_ICON, LAYOUT, COLORES
-from utils import render_sidebar, cargar_plantilla_desde_drive, mapear_posicion, obtener_foto_jugador
+from config import PAGE_TITLE, PAGE_ICON, LAYOUT, COLORES, DATA_DIR
+from utils import (
+    render_sidebar,
+    cargar_datos_csv,
+    cargar_plantilla_desde_drive,
+    mapear_datos_con_plantilla,
+    obtener_foto_jugador,
+)
 from utils.drive_loader import autenticar_google_drive, listar_archivos_carpeta, FOLDER_IDS
 
 st.set_page_config(
@@ -481,11 +487,11 @@ def load_drive_positions() -> pd.DataFrame:
         if df_plantilla is None or df_plantilla.empty:
             return pd.DataFrame(columns=["Jugador GPS", "Posición"])
 
-        required_cols = {"Jugador GPS", "Posición"}
+        required_cols = {"Jugador", "Jugador GPS", "Posición"}
         if not required_cols.issubset(df_plantilla.columns):
-            return pd.DataFrame(columns=["Jugador GPS", "Posición"])
+            return pd.DataFrame(columns=sorted(required_cols))
 
-        df_plantilla = df_plantilla[list(required_cols)].copy()
+        df_plantilla = df_plantilla[sorted(required_cols)].copy()
         df_plantilla["Jugador GPS"] = df_plantilla["Jugador GPS"].astype(str).str.strip()
         df_plantilla["Posición"] = df_plantilla["Posición"].astype(str).str.strip()
         df_plantilla = df_plantilla[df_plantilla["Jugador GPS"].ne("")]
@@ -546,32 +552,13 @@ def prepare_ubiko_dataset(df_all: pd.DataFrame) -> pd.DataFrame:
     df_all["player_norm"] = df_all["player"].apply(normalizar_texto)
 
     df_positions = load_drive_positions()
-    if not df_positions.empty:
-        position_map = df_positions.set_index("player_norm")["Posición"]
-        df_all["position_drive"] = df_all["player_norm"].map(position_map)
-        faltantes = df_all["position_drive"].isna()
-        if faltantes.any():
-            df_all.loc[faltantes, "position_drive"] = df_all.loc[faltantes, "player"].apply(
-                lambda nombre: mapear_posicion(str(nombre), df_positions)
-            )
-            df_all.loc[df_all["position_drive"] == "Sin posición", "position_drive"] = np.nan
-    else:
-        df_all["position_drive"] = np.nan
-
-    df_all["position_source"] = np.where(
-        df_all["position_drive"].notna(),
-        "drive",
-        "csv_fallback",
-    )
-
-    df_all["position"] = (
-        df_all["position_drive"]
-        .fillna(df_all["position_csv"])
-        .replace("", "Sin posición")
-        .fillna("Sin posición")
-        .astype(str)
-        .str.strip()
-    )
+    if df_positions.empty:
+        return pd.DataFrame()
+    df_all = mapear_datos_con_plantilla(df_all, df_positions)
+    if df_all.empty:
+        return df_all
+    df_all["position_source"] = "drive"
+    df_all["position"] = df_all["position"].fillna("").astype(str).str.strip()
     df_all["task"] = df_all["task"].fillna("Total").astype(str)
 
     # Orden de sesión para lecturas más naturales.
@@ -626,6 +613,13 @@ def load_ubiko_dataset() -> pd.DataFrame:
                         temp_path.unlink(missing_ok=True)
                 except Exception:
                     pass
+
+    # Keep local development/deployment compatible with the original scanner:
+    # the data folder may contain CSVs directly or inside session subfolders.
+    if not frames and DATA_DIR.exists():
+        local_df = cargar_datos_csv(DATA_DIR)
+        if local_df is not None and not local_df.empty:
+            frames.append(local_df)
 
     if not frames:
         return pd.DataFrame()

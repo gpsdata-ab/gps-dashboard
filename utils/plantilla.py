@@ -5,11 +5,36 @@ Carga información de jugadores (posición, fecha nacimiento, etc.)
 
 import pandas as pd
 from pathlib import Path
+import re
+import unicodedata
+import warnings
 
 
 # Ruta al archivo Excel de plantilla
 RUTA_PLANTILLA = 'assets/jugadores/Plantillas CE Europa.XLSX'
 HOJA_PLANTILLA = 'First Team'
+
+
+def _normalizar_texto(valor):
+    """Normaliza espacios, mayúsculas y acentos for lookup comparisons."""
+    texto = str(valor).strip()
+    texto = re.sub(r"\s+", " ", texto)
+    texto = unicodedata.normalize("NFKD", texto)
+    return "".join(
+        caracter for caracter in texto if not unicodedata.combining(caracter)
+    ).casefold()
+
+
+def _limpiar_campo(valor):
+    """Trim a text field and collapse accidental repeated whitespace."""
+    if pd.isna(valor):
+        return ""
+    texto = str(valor).replace("\ufeff", "").replace("\u200b", "")
+    texto = "".join(
+        caracter for caracter in texto
+        if unicodedata.category(caracter) not in {"Cc", "Cf"}
+    )
+    return re.sub(r"\s+", " ", texto).strip()
 
 
 def cargar_plantilla_europa():
@@ -45,13 +70,18 @@ def cargar_plantilla_europa():
         
         # Limpiar datos
         df = df.dropna(subset=['Jugador GPS'])  # Eliminar filas sin nombre GPS
-        df['Jugador GPS'] = df['Jugador GPS'].astype(str).str.strip()  # Limpiar espacios
-        df['Posición'] = df['Posición'].astype(str).str.strip()  # Limpiar espacios
+        df['Jugador GPS'] = df['Jugador GPS'].map(_limpiar_campo)
+        df['Jugador'] = df['Jugador'].map(_limpiar_campo)
+        df['Posición'] = df['Posición'].map(_limpiar_campo)
         
         # Verificar que Jugador GPS no tenga duplicados
         duplicados = df[df['Jugador GPS'].duplicated()]['Jugador GPS'].tolist()
         if duplicados:
-            print(f"⚠️ Advertencia: Jugadores GPS duplicados en plantilla: {duplicados}")
+            warnings.warn(
+                f"Duplicate GPS player names in plantilla: {duplicados}",
+                RuntimeWarning,
+                stacklevel=2,
+            )
         
         return df
         
@@ -81,19 +111,47 @@ def mapear_posicion(nombre_gps, df_plantilla):
     if df_plantilla is None or len(df_plantilla) == 0:
         return 'Sin posición'
     
-    # Buscar coincidencia exacta
-    match = df_plantilla[df_plantilla['Jugador GPS'] == nombre_gps]
-    
-    if len(match) > 0:
-        return match['Posición'].iloc[0]
-    
-    # Si no hay coincidencia, buscar parcial (case-insensitive)
-    match_parcial = df_plantilla[
-        df_plantilla['Jugador GPS'].str.lower().str.contains(nombre_gps.lower(), na=False)
+    nombre_normalizado = _normalizar_texto(nombre_gps)
+    if not nombre_normalizado:
+        return 'Sin posición'
+    name_columns = [
+        column for column in ('Jugador GPS', 'Jugador')
+        if column in df_plantilla.columns
     ]
-    
-    if len(match_parcial) > 0:
-        return match_parcial['Posición'].iloc[0]
+
+    for name_column in name_columns:
+        nombres_normalizados = df_plantilla[name_column].map(_normalizar_texto)
+        match = df_plantilla[nombres_normalizados == nombre_normalizado]
+        if len(match) > 0:
+            return _limpiar_campo(match['Posición'].iloc[0])
+
+    # Admitir diferencias entre nombres completos y alias GPS, sin permitir
+    # coincidencias de una o dos letras.
+    if len(nombre_normalizado) >= 3:
+        candidate_frames = []
+        for name_column in name_columns:
+            nombres_normalizados = df_plantilla[name_column].map(_normalizar_texto)
+            candidatos = df_plantilla[
+                nombres_normalizados.map(
+                    lambda candidato: (
+                        nombre_normalizado in candidato
+                        or candidato in nombre_normalizado
+                    )
+                )
+            ].copy()
+            if not candidatos.empty:
+                candidatos["_match_length"] = candidatos[name_column].map(
+                    lambda candidato: len(_normalizar_texto(candidato))
+                )
+                candidate_frames.append(candidatos)
+
+        if candidate_frames:
+            candidatos = pd.concat(candidate_frames).drop_duplicates()
+            mejor_match = candidatos.sort_values(
+                "_match_length",
+                ascending=False,
+            ).iloc[0]
+            return _limpiar_campo(mejor_match['Posición'])
     
     return 'Sin posición'
 

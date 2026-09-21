@@ -13,7 +13,13 @@ from datetime import datetime
 from config import PAGE_TITLE, PAGE_ICON, LAYOUT
 
 # Importar utilidades
-from utils import render_sidebar, cargar_datos_desde_drive, convertir_tiempo_a_minutos
+from utils import (
+    render_sidebar,
+    cargar_datos_desde_drive,
+    cargar_plantilla_desde_drive,
+    convertir_tiempo_a_minutos,
+    mapear_datos_con_plantilla,
+)
 from utils.auth import mostrar_login, mostrar_info_usuario
 from utils.drive_loader import obtener_escudo_path
 
@@ -31,6 +37,19 @@ def cargar_datos_en_sesion():
     df = cargar_datos_desde_drive(equipo='europa')
 
     if df is None or len(df) == 0:
+        return False
+
+    plantilla = cargar_plantilla_desde_drive(equipo='europa')
+    if plantilla is None or plantilla.empty:
+        st.error("❌ No se pudo cargar la plantilla maestra para mapear los jugadores GPS")
+        return False
+    try:
+        df = mapear_datos_con_plantilla(df, plantilla)
+    except ValueError as error:
+        st.error(f"❌ Estructura de plantilla no válida: {error}")
+        return False
+    if df.empty:
+        st.error("❌ Ningún jugador GPS coincide con la plantilla maestra")
         return False
 
     # Normalizar columnas base para asegurar métricas derivadas.
@@ -235,8 +254,7 @@ def main():
             
             #### 📊 Páginas disponibles:
             
-            - **📊 Equipo:** Player Cards y análisis del partido
-            - **👤 Individual:** Evolución y análisis por jugador
+            - **📊 Análisis de partidos:** Player Cards y análisis del partido
             - **📊 Estatus del Equipo:** <span class="new-badge">NUEVO</span> Vista panorámica con gráficos avanzados
             - **📍 GPS UBIKO:** <span class="new-badge">NUEVO</span> Control real de carga por jugador con CSV Ubiko
             
@@ -320,22 +338,24 @@ def main():
         # Instrucciones de uso
         st.markdown("""
         ### 🎯 Cómo usar la aplicación
-        
-        #### 📊 **Páginas disponibles:**
-        
-        **Para análisis rápido:**
-        - **📊 Equipo:** Player Cards con rendimiento individual del partido
-        
-        **Para análisis detallado:**
-        - **👤 Individual:** Evolución temporal de cada jugador con filtros flexibles
-        - **📊 Estatus del Equipo:** <span class="new-badge">NUEVO v2.5</span> Vista panorámica del equipo con múltiples filtros
-        - **📍 GPS UBIKO:** <span class="new-badge">NUEVO</span> Datos reales Ubiko por jugador, sesión y métrica
-        
-        #### 💡 **Características principales:**
-        - **Filtros flexibles** en cada página (Partido específico / Últimos N / Rango de fechas)
-        - **Referencias normalizadas** a 94 minutos (>60 min jugados)
-        - **Visualizaciones interactivas** con Plotly
-        - **Exportación a PDF** en análisis individual
+
+        La herramienta está estructurada en dos grandes bloques de trabajo:
+
+        #### 📋 Módulos disponibles:
+
+        **A. 📋 Prescripción de la Carga (En desarrollo)**
+        - Configuración de microciclos tipo (2 a 6 sesiones).
+        - Asignación de % de carga por sesión y jugador (Return to Play, fatiga).
+        - Control de ejecución y seguimiento semanal mediante sistema de alertas "semáforo".
+
+        **B. 📊 Análisis de la Carga / Partidos**
+        - Análisis panorámico del rendimiento del equipo en partidos.
+        - Filtros simplificados por estadístico (Media, Máxima, Sumatorio) y tramos de partido.
+
+        #### 💡 Características principales:
+        - Mapeo de métricas clave: HSR, Sprint, HMLD y Max Speed.
+        - Normalización automática de métricas a 75 minutos para jugadores con menor rodaje o suplentes.
+        - Visualizaciones interactivas de carga y rendimiento.
         
         ---
         
