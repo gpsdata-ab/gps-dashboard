@@ -49,6 +49,14 @@ from .filtros import render_filtro_partidos
 
 # ← ELIMINADA LÍNEA: from utils.proteccion import inicializar_pagina
 
+from .normalization import normalize_to_75_min, get_positional_average
+from .reference_engine import (
+    get_microcycle_structure,
+    map_microcycle_dates,
+    aggregate_actual_loads,
+    calculate_references,
+)
+
 __all__ = [
     # data_loader
     'validar_columnas',
@@ -93,5 +101,13 @@ __all__ = [
     'cerrar_sesion',
     'mostrar_info_usuario',
     # pdf
-    'generar_pdf_evolucion_individual'
+    'generar_pdf_evolucion_individual',
+    # normalization
+    'normalize_to_75_min',
+    'get_positional_average',
+    # reference_engine
+    'get_microcycle_structure',
+    'map_microcycle_dates',
+    'aggregate_actual_loads',
+    'calculate_references'
 ]
