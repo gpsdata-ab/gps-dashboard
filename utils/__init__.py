@@ -45,7 +45,11 @@ from .auth import (
     mostrar_info_usuario
 )
 
-from .filtros import render_filtro_partidos
+from .filtros import (
+    clasificar_tramo_partido,
+    render_filtro_partidos,
+    filtrar_solo_partidos,
+)
 
 # ← ELIMINADA LÍNEA: from utils.proteccion import inicializar_pagina
 
@@ -89,7 +93,9 @@ __all__ = [
     # sidebar
     'render_sidebar',
     # filtros
+    'clasificar_tramo_partido',
     'render_filtro_partidos',
+    'filtrar_solo_partidos',
     # plantilla
     'cargar_plantilla_europa',
     'mapear_posicion',
