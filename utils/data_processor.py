@@ -47,7 +47,8 @@ def convertir_tiempo_a_minutos(tiempo_str):
 
 def procesar_datos(df):
     """
-    Procesa los datos: filtra, convierte tiempo, calcula métricas
+    Procesa los datos de partidos: conserva sus tareas Total y por tramos,
+    convierte tiempo y calcula métricas.
     
     Args:
         df (pd.DataFrame): DataFrame crudo
@@ -55,9 +56,10 @@ def procesar_datos(df):
     Returns:
         pd.DataFrame: DataFrame procesado
     """
-    # Filtrar solo task='Total'
-    df = df[df['task'].str.contains('Total', case=False, na=False)].copy()
-    
+    from utils.filtros import filtrar_solo_partidos
+
+    df = filtrar_solo_partidos(df)
+
     # Filtrar solo registros con jugador
     df = df[df['player'].notna()].copy()
     
