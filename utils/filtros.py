@@ -11,7 +11,9 @@ from utils import filtrar_por_fechas
 
 
 def _normalizar_texto(valor):
-    txt = str(valor or "").strip().lower()
+    if pd.isna(valor):
+        return ""
+    txt = str(valor).strip().lower()
     txt = unicodedata.normalize("NFKD", txt)
     txt = "".join(ch for ch in txt if not unicodedata.combining(ch))
     txt = re.sub(r"[^a-z0-9]+", " ", txt)
@@ -23,21 +25,71 @@ def es_partido(row):
     task_txt = _normalizar_texto(row.get("task", ""))
     combinado = f"{session_txt} {task_txt}".strip()
 
-    if re.search(r"\bj\d+\b", session_txt):
-        return True
-    if "san luqueno" in session_txt:
-        return True
-    if re.search(r"\b(partido|match|game)\b", combinado):
-        return True
-    if re.search(r"\b(periodo|parte|half|mitad|temps|tiempo)\b", task_txt):
-        return True
-    return False
+    if re.search(
+        r"\b(entrenamiento|entrenamientos|entreno|training|gym|gimnasio|"
+        r"gimnasia|reco|recovery|activacion)\b",
+        combinado,
+    ):
+        return False
+
+    return bool(
+        re.search(r"\b(j\s*\d+|jornada\s*\d+)\b", combinado)
+        or re.search(
+            r"\b(amistoso|amistosos|pretemporada|preseason|pre\s+season|"
+            r"friendly|friendlies|test|trofeo|trofeos|torneo|torneos|"
+            r"copa|copas|liga|league)\b",
+            combinado,
+        )
+    )
+
+
+def clasificar_tramo_partido(task):
+    task_txt = _normalizar_texto(task)
+    task_compacto = task_txt.replace(" ", "")
+
+    if re.search(r"\btotal\b", task_txt):
+        return "Total"
+
+    tiene_token_parte = re.search(
+        r"\b(parte|part|periodo|period|half|mitad|temps|tiempo)\b",
+        task_txt,
+    ) is not None
+    es_primera = re.search(
+        r"\b(1|1a|1r|1st|p1|primera|primer|first)\b",
+        task_txt,
+    ) is not None
+    es_segunda = re.search(
+        r"\b(2|2a|2n|2nd|p2|segunda|segundo|second)\b",
+        task_txt,
+    ) is not None
+    primera_compacta = any(
+        token in task_compacto
+        for token in [
+            "1apart", "part1", "parte1", "periodo1", "period1", "half1",
+            "mitad1", "primertemps", "primerapart", "p1"
+        ]
+    ) or "firsthalf" in task_compacto
+    segunda_compacta = any(
+        token in task_compacto
+        for token in [
+            "2apart", "part2", "parte2", "periodo2", "period2", "half2",
+            "mitad2", "segontemps", "segundapart", "p2"
+        ]
+    ) or "secondhalf" in task_compacto
+
+    if (es_primera and tiene_token_parte) or primera_compacta:
+        return "1ª parte"
+    if (es_segunda and tiene_token_parte) or segunda_compacta:
+        return "2ª parte"
+    return None
 
 
 def filtrar_solo_partidos(df):
     if df is None or len(df) == 0:
         return df
-    return df[df.apply(es_partido, axis=1)].copy()
+    partidos_validos = df.apply(es_partido, axis=1)
+    tareas_validas = df["task"].map(clasificar_tramo_partido).notna()
+    return df[partidos_validos & tareas_validas].copy()
 
 
 def render_filtro_partidos(
@@ -64,7 +116,10 @@ def render_filtro_partidos(
     else:
         df_rango = df.copy()
     
-    # Obtener fechas disponibles
+    # Sólo ofrecer fechas válidas que tengan filas tras los filtros aplicados.
+    df_rango = df_rango.copy()
+    df_rango['date'] = pd.to_datetime(df_rango['date'], errors='coerce')
+    df_rango = df_rango.dropna(subset=['date'])
     fechas_disponibles = sorted(df_rango['date'].unique())
     
     if len(fechas_disponibles) == 0:
@@ -109,17 +164,18 @@ def render_filtro_partidos(
             }
             
         elif modo_partido == 'Últimos N partidos':
+            max_partidos = min(10, len(fechas_disponibles))
             n_partidos = st.selectbox(
                 "Últimos N partidos:",
-                options=[1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
-                index=2,  # Default: 3
+                options=list(range(1, max_partidos + 1)),
+                index=min(2, max_partidos - 1),
                 key='n_partidos_filtro'
             )
             fechas_recientes = fechas_disponibles[-n_partidos:]
             df_filtrado = df_rango[df_rango['date'].isin(fechas_recientes)].copy()
             
             info_dict = {
-                'n_partidos': n_partidos,
+                'n_partidos': len(fechas_recientes),
                 'fecha_inicio': fechas_recientes[0],
                 'fecha_fin': fechas_recientes[-1],
                 'fechas_incluidas': fechas_recientes

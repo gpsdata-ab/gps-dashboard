@@ -78,9 +78,10 @@ def default_allocations(sessions: list[str]) -> dict[str, int]:
     if not sessions:
         return {}
     allocations = {session: 5 for session in sessions}
-    allocations[sessions[0]] = 70
+    # MD+1 is at the end of the microcycle
+    allocations[sessions[-1]] = 70
     remaining = 30 - 5 * (len(sessions) - 1)
-    for session in sessions[1:]:
+    for session in sessions[:-1]:
         if remaining <= 0:
             break
         allocations[session] += 5
@@ -136,7 +137,9 @@ def _reference_frame(
             source = source[source["date"].isin(recent_dates)]
     if source.empty:
         return pd.DataFrame(columns=["player", "position", "baseline_target"])
-    return calculate_references(source, metric_column, statistic)
+    
+    is_peak = metric_column == "max_speed"
+    return calculate_references(source, metric_column, statistic, is_peak_metric=is_peak)
 
 
 def _metric_unit(metric_label: str) -> str:
@@ -217,18 +220,31 @@ def main() -> None:
             options=list(METRIC_OPTIONS),
             key="prescription_metric",
         )
+    
+    is_max_speed = metric_label == "Max speed"
+
     with control_columns[2]:
-        statistic_label = st.selectbox(
-            "Estadístico",
-            options=list(STATISTIC_OPTIONS),
-            key="prescription_statistic",
-        )
+        if is_max_speed:
+            statistic_label = st.selectbox(
+                "Estadístico",
+                options=["Pico máximo"],
+                disabled=True,
+                key="prescription_statistic_max_speed",
+                help="Max speed requiere utilizar el estadístico de Pico máximo exclusivamente.",
+            )
+        else:
+            statistic_label = st.selectbox(
+                "Estadístico",
+                options=list(STATISTIC_OPTIONS),
+                key="prescription_statistic",
+            )
+            
     with control_columns[3]:
         microcycle_start = st.date_input(
-            "Fecha de inicio del Microciclo (MD+1)",
+            "Inicio microciclo",
             value=default_start_date,
             key="prescription_microcycle_start",
-            help="La fecha seleccionada se considera MD+1; las sesiones siguientes avanzan un día cada una.",
+            help="Fecha de inicio del microciclo (MD-N). Las sesiones avanzan hasta MD+1 al final.",
         )
     with control_columns[4]:
         load_multiplier = st.selectbox(

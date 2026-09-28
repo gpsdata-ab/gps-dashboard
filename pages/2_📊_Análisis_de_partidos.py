@@ -23,7 +23,11 @@ from utils import (
     mapear_posicion,
     obtener_foto_jugador
 )
-from utils.filtros import render_filtro_partidos, filtrar_solo_partidos
+from utils.filtros import (
+    clasificar_tramo_partido,
+    render_filtro_partidos,
+    filtrar_solo_partidos,
+)
 
 # Configuración
 st.set_page_config(
@@ -32,6 +36,21 @@ st.set_page_config(
     layout=LAYOUT,
     initial_sidebar_state="collapsed"
 )
+
+
+def normalizar_texto(valor):
+    if pd.isna(valor):
+        return ""
+    txt = str(valor).strip().lower()
+    txt = unicodedata.normalize("NFKD", txt)
+    txt = "".join(ch for ch in txt if not unicodedata.combining(ch))
+    txt = re.sub(r"[^a-z0-9]+", " ", txt)
+    return txt.strip()
+
+
+def clasificar_tramo(row):
+    return clasificar_tramo_partido(row.get('task')) or 'Total'
+
 
 def main():
     # ==========================================
@@ -64,12 +83,60 @@ def main():
     # FILTRO DE PARTIDOS
     # ========================================
     df_partidos = filtrar_solo_partidos(df)
+    if df_partidos is not None and len(df_partidos) > 0:
+        df_partidos = df_partidos.copy()
+        df_partidos['date'] = pd.to_datetime(df_partidos['date'], errors='coerce')
+        df_partidos = (
+            df_partidos.sort_values('date', kind='stable')
+            .copy()
+        )
     if df_partidos is None or len(df_partidos) == 0:
         st.warning("⚠️ No se han identificado partidos en los datos cargados.")
         st.stop()
 
+    df_partidos['tramo_partido'] = df_partidos.apply(clasificar_tramo, axis=1)
+    st.markdown("## ⚙️ Configuración del Análisis")
+    filtro_parte = st.selectbox(
+        "⏱️ Tramo de partido:",
+        options=[
+            "Total",
+            "1ª parte",
+            "2ª parte",
+            "1ª y 2ª parte",
+        ],
+        key="filtro_parte_analisis",
+        help="Total, primera parte, segunda parte o ambas partes."
+    )
+
+    df_partidos_selector = df_partidos[
+        df_partidos['player'].notna()
+        & df_partidos['player'].astype(str).str.strip().ne('')
+        & df_partidos['player'].astype(str).ne('0')
+    ].copy()
+    if filtro_parte == "Total":
+        df_tramo_selector = df_partidos_selector[
+            df_partidos_selector['tramo_partido'] == 'Total'
+        ]
+        if len(df_tramo_selector) == 0:
+            df_tramo_selector = df_partidos_selector
+    elif filtro_parte == "1ª parte":
+        df_tramo_selector = df_partidos_selector[
+            df_partidos_selector['tramo_partido'] == '1ª parte'
+        ]
+    elif filtro_parte == "2ª parte":
+        df_tramo_selector = df_partidos_selector[
+            df_partidos_selector['tramo_partido'] == '2ª parte'
+        ]
+    else:
+        df_tramo_selector = df_partidos_selector[
+            df_partidos_selector['tramo_partido'].isin(['1ª parte', '2ª parte'])
+        ]
+    if len(df_tramo_selector) == 0:
+        st.warning("⚠️ No hay datos para el tramo de partido seleccionado.")
+        st.stop()
+
     df_filtrado, modo_partido, info_filtro = render_filtro_partidos(
-        df_partidos,
+        df_tramo_selector,
         titulo="🎯 Filtros de Partido",
         incluir_rango_fechas=False,
     )
@@ -79,8 +146,6 @@ def main():
     # ========================================
     # CONFIGURACIÓN DEL ANÁLISIS
     # ========================================
-    st.markdown("## ⚙️ Configuración del Análisis")
-    
     col1, col2, col3 = st.columns(3)
     
     with col1:
@@ -123,18 +188,6 @@ def main():
         help="Añade una línea discontinua para facilitar la lectura (sube, baja o estable)."
     )
 
-    filtro_parte = st.selectbox(
-        "⏱️ Tramo de partido:",
-        options=[
-            "Total",
-            "1ª parte",
-            "2ª parte",
-            "1ª y 2ª parte",
-        ],
-        key="filtro_parte_analisis",
-        help="Total, primera parte, segunda parte o ambas partes."
-    )
-
     st.markdown("---")
     
     # ========================================
@@ -147,56 +200,6 @@ def main():
     df_limpio = df_limpio[df_limpio['player'].astype(str).str.strip() != '']
     df_limpio = df_limpio[df_limpio['player'].astype(str) != '0']
     df_limpio_base = df_limpio.copy()
-
-    # Clasificar tramo por task/session para habilitar filtro de 1ª/2ª parte.
-    def normalizar_texto(valor):
-        txt = str(valor or "").strip().lower()
-        txt = unicodedata.normalize("NFKD", txt)
-        txt = "".join(ch for ch in txt if not unicodedata.combining(ch))
-        txt = re.sub(r"[^a-z0-9]+", " ", txt)
-        return txt.strip()
-
-    def clasificar_tramo(row):
-        task_txt = normalizar_texto(row.get('task', ''))
-        session_txt = normalizar_texto(row.get('session', ''))
-        txt = f"{task_txt} {session_txt}"
-        txt_compacto = txt.replace(" ", "")
-        if 'total' in txt:
-            return 'Total'
-        if any(token in txt_compacto for token in ["total", "complet", "completo", "fullmatch"]):
-            return 'Total'
-
-        tiene_token_parte = re.search(
-            r"\b(parte|part|periodo|period|half|mitad|temps|tiempo)\b", txt
-        ) is not None
-        es_primera = re.search(
-            r"\b(1|1a|1r|p1|periodo 1|period 1|primera|primer|first)\b", txt
-        ) is not None
-        es_segunda = re.search(
-            r"\b(2|2a|2n|p2|periodo 2|period 2|segunda|segundo|second)\b", txt
-        ) is not None
-        primera_compacta = any(
-            token in txt_compacto
-            for token in [
-                "1apart", "part1", "parte1", "periodo1", "period1", "half1", "mitad1",
-                "primertemps", "primerapart", "firsthalf", "p1"
-            ]
-        )
-        segunda_compacta = any(
-            token in txt_compacto
-            for token in [
-                "2apart", "part2", "parte2", "periodo2", "period2", "half2", "mitad2",
-                "segontemps", "segundapart", "secondhalf", "p2"
-            ]
-        )
-
-        # Ejemplos: "1A PART", "1ª PARTE", "Periodo 1", "P1", "First half"
-        if (es_primera and tiene_token_parte) or primera_compacta:
-            return '1ª parte'
-        # Ejemplos: "2A PART", "2ª PARTE", "Periodo 2", "P2", "Second half"
-        if (es_segunda and tiene_token_parte) or segunda_compacta:
-            return '2ª parte'
-        return 'Total'
 
     df_limpio['tramo_partido'] = df_limpio.apply(clasificar_tramo, axis=1)
 

@@ -9,17 +9,21 @@ from .normalization import get_positional_average, normalize_to_75_min
 
 
 def get_microcycle_structure(num_sessions: int) -> list[str]:
-    """Return the standard match-day labels for a microcycle length."""
+    """Return the standard match-day labels for a microcycle length.
+
+    MD+1 is placed at the end of the sequence.
+    Example for 4 sessions: ['MD-4', 'MD-3', 'MD-2', 'MD-1', 'MD+1']
+    """
     if num_sessions < 1:
         return []
-    return ["MD+1"] + [f"MD-{i}" for i in range(num_sessions, 0, -1)]
+    return [f"MD-{i}" for i in range(num_sessions, 0, -1)] + ["MD+1"]
 
 
 def map_microcycle_dates(
     start_date: date | datetime | str,
     sessions: list[str],
 ) -> dict[str, date]:
-    """Map sessions to consecutive calendar dates starting at MD+1."""
+    """Map sessions to consecutive calendar dates starting at MD-N and ending at MD+1."""
     selected_date = pd.Timestamp(start_date).date()
     return {
         session: selected_date + timedelta(days=offset)
@@ -41,7 +45,7 @@ def aggregate_actual_loads(
     if result.empty:
         return result
 
-    for session, session_date in session_dates.items():
+    for session in session_dates:
         result[f"Actual {session}"] = 0.0
 
     if "player" not in df.columns or "date" not in df.columns or metric not in df.columns:
@@ -54,7 +58,12 @@ def aggregate_actual_loads(
 
     for session, session_date in session_dates.items():
         matching = source[source["date"] == session_date]
-        totals = matching.groupby("player", dropna=False)[metric].sum()
+        # For max_speed take the maximum value in that day instead of sum
+        if metric == "max_speed":
+            totals = matching.groupby("player", dropna=False)[metric].max()
+        else:
+            totals = matching.groupby("player", dropna=False)[metric].sum()
+
         result[f"Actual {session}"] = (
             result["player"].map(totals).fillna(0.0).astype(float)
         )
@@ -88,13 +97,12 @@ def calculate_references(
     df: pd.DataFrame,
     metric: str,
     stat_type: str,
+    is_peak_metric: bool = False,
 ) -> pd.DataFrame:
-    """Calculate one normalized baseline target per player.
+    """Calculate one baseline target per player.
 
-    Values are normalized to a 75-minute equivalent before aggregation.  A
-    player's missing metric values are imputed with the positional average
-    calculated from rows with at least 75 minutes.  The returned frame has
-    ``player``, ``position`` and ``baseline_target`` columns.
+    Volume metrics are normalized to a 75-minute equivalent. Peak metrics (e.g., max_speed)
+    are taken as raw unscaled values without minute normalization.
     """
     minutes_column = (
         "minutes_played" if "minutes_played" in df.columns else "time"
@@ -107,12 +115,17 @@ def calculate_references(
 
     statistic = _get_statistic(stat_type)
     working = df[["player", "position", minutes_column, metric]].copy()
-    working["_normalized_metric"] = [
-        normalize_to_75_min(value, minutes)
-        if pd.notna(value) and pd.notna(minutes)
-        else float("nan")
-        for value, minutes in zip(working[metric], working[minutes_column])
-    ]
+
+    # Peak metrics like max_speed MUST NOT be scaled by time
+    if is_peak_metric or metric == "max_speed":
+        working["_normalized_metric"] = pd.to_numeric(working[metric], errors="coerce")
+    else:
+        working["_normalized_metric"] = [
+            normalize_to_75_min(value, minutes)
+            if pd.notna(value) and pd.notna(minutes)
+            else float("nan")
+            for value, minutes in zip(working[metric], working[minutes_column])
+        ]
 
     positional_averages = {
         position: get_positional_average(
@@ -125,7 +138,11 @@ def calculate_references(
 
     targets = []
     for player, player_rows in working.groupby("player", dropna=False, sort=False):
-        position = player_rows["position"].dropna().iloc[0] if player_rows["position"].notna().any() else None
+        position = (
+            player_rows["position"].dropna().iloc[0]
+            if player_rows["position"].notna().any()
+            else None
+        )
         values = player_rows["_normalized_metric"].dropna()
         if values.empty:
             values = pd.Series([positional_averages.get(position, 0.0)])
