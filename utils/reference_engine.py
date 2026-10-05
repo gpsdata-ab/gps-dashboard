@@ -52,7 +52,9 @@ def aggregate_actual_loads(
         return result
 
     source = df[["player", "date", metric]].copy()
-    source["date"] = pd.to_datetime(source["date"], errors="coerce").dt.date
+    source["date"] = pd.to_datetime(
+        source["date"], errors="coerce", format="mixed"
+    ).dt.date
     source[metric] = pd.to_numeric(source[metric], errors="coerce").fillna(0.0)
     source = source[source["player"].notna()]
 
@@ -104,37 +106,51 @@ def calculate_references(
     Volume metrics are normalized to a 75-minute equivalent. Peak metrics (e.g., max_speed)
     are taken as raw unscaled values without minute normalization.
     """
-    minutes_column = (
-        "minutes_played" if "minutes_played" in df.columns else "time"
-    )
-    required_columns = {"player", "position", minutes_column, metric}
+    is_peak = is_peak_metric or metric == "max_speed"
+    minutes_column = "minutes_played" if "minutes_played" in df.columns else "time"
+    required_columns = {"player", "position", metric}
+    if not is_peak:
+        required_columns.add(minutes_column)
     missing_columns = required_columns.difference(df.columns)
     if missing_columns:
         missing = ", ".join(sorted(missing_columns))
         raise KeyError(f"Missing required column(s): {missing}")
 
     statistic = _get_statistic(stat_type)
-    working = df[["player", "position", minutes_column, metric]].copy()
+    working_columns = ["player", "position", metric]
+    if minutes_column in df.columns:
+        working_columns.append(minutes_column)
+    working = df[working_columns].copy()
 
-    # Peak metrics like max_speed MUST NOT be scaled by time
-    if is_peak_metric or metric == "max_speed":
+    if is_peak:
         working["_normalized_metric"] = pd.to_numeric(working[metric], errors="coerce")
     else:
+        working[minutes_column] = pd.to_numeric(
+            working[minutes_column], errors="coerce"
+        )
+        metric_values = pd.to_numeric(working[metric], errors="coerce")
         working["_normalized_metric"] = [
             normalize_to_75_min(value, minutes)
             if pd.notna(value) and pd.notna(minutes)
             else float("nan")
-            for value, minutes in zip(working[metric], working[minutes_column])
+            for value, minutes in zip(metric_values, working[minutes_column])
         ]
 
-    positional_averages = {
-        position: get_positional_average(
-            working,
-            "_normalized_metric",
-            position,
+    if is_peak:
+        positional_averages = (
+            working.groupby("position")["_normalized_metric"]
+            .mean()
+            .to_dict()
         )
-        for position in working["position"].dropna().unique()
-    }
+    else:
+        positional_averages = {
+            position: get_positional_average(
+                working,
+                "_normalized_metric",
+                position,
+            )
+            for position in working["position"].dropna().unique()
+        }
 
     targets = []
     for player, player_rows in working.groupby("player", dropna=False, sort=False):

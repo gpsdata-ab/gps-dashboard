@@ -11,7 +11,7 @@ ROOT_DIR = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT_DIR))
 
 from config import LAYOUT, PAGE_ICON, PAGE_TITLE
-from utils import render_sidebar
+from utils import filtrar_solo_partidos, render_sidebar
 from utils.reference_engine import (
     aggregate_actual_loads,
     calculate_references,
@@ -73,41 +73,56 @@ def inject_styles() -> None:
     )
 
 
-def default_allocations(sessions: list[str]) -> dict[str, int]:
-    """Create a 100% allocation in 5-point increments."""
+def default_allocations(
+    sessions: list[str],
+    independent_exposure: bool = False,
+) -> dict[str, int]:
+    """Create default allocation percentages in 5-point increments."""
     if not sessions:
         return {}
+    if independent_exposure:
+        return {session: 100 for session in sessions}
+
     allocations = {session: 5 for session in sessions}
-    # MD+1 is at the end of the microcycle
-    allocations[sessions[-1]] = 70
-    remaining = 30 - 5 * (len(sessions) - 1)
-    for session in sessions[:-1]:
-        if remaining <= 0:
+    remaining = 100 - sum(allocations.values())
+    for session in reversed(sessions):
+        increment = min(remaining, 80 - allocations[session])
+        allocations[session] += increment
+        remaining -= increment
+        if remaining == 0:
             break
-        allocations[session] += 5
-        remaining -= 5
     return allocations
 
 
-def render_allocation_controls(sessions: list[str]) -> dict[str, int]:
+def render_allocation_controls(
+    sessions: list[str],
+    independent_exposure: bool = False,
+) -> dict[str, int]:
     """Render one percentage input per session and return current values."""
-    defaults = default_allocations(sessions)
+    defaults = default_allocations(sessions, independent_exposure)
     values: dict[str, int] = {}
     session_key = "_".join(sessions)
+    allocation_mode = "exposure" if independent_exposure else "weekly"
     columns = st.columns(len(sessions))
     for column, session in zip(columns, sessions):
         with column:
             values[session] = st.number_input(
                 session,
-                min_value=5,
-                max_value=80,
+                min_value=50 if independent_exposure else 5,
+                max_value=100 if independent_exposure else 80,
                 value=int(defaults[session]),
                 step=5,
-                key=f"prescription_allocation_{session_key}_{session}",
-                help="Porcentaje de la carga semanal asignado a esta sesión.",
+                key=f"prescription_allocation_{allocation_mode}_{session_key}_{session}",
+                help=(
+                    "Porcentaje independiente de exposición para esta sesión."
+                    if independent_exposure
+                    else "Porcentaje de la carga semanal asignado a esta sesión."
+                ),
             )
     total = sum(values.values())
-    if total != 100:
+    if independent_exposure:
+        st.caption("Exposición por sesión independiente (50–100%).")
+    elif total != 100:
         st.warning(
             f"La distribución actual suma {total}%. Ajusta las sesiones para llegar a 100%."
         )
@@ -121,24 +136,35 @@ def _reference_frame(
     metric_column: str,
     statistic: str,
 ) -> pd.DataFrame:
-    """Calculate player references from the loaded GPS data."""
-    required = {"player", "position", "time", metric_column}
-    if not required.issubset(df.columns):
+    """Calculate player references from match records only."""
+    source = filtrar_solo_partidos(df)
+    is_peak = metric_column == "max_speed"
+    required = {"player", "position", metric_column}
+    if not is_peak and not {"minutes_played", "time"}.intersection(source.columns):
         return pd.DataFrame(columns=["player", "position", "baseline_target"])
-    source = df.copy()
-    source["time"] = pd.to_numeric(source["time"], errors="coerce")
+    if not required.issubset(source.columns):
+        return pd.DataFrame(columns=["player", "position", "baseline_target"])
+    source = source.copy()
+    if "time" in source.columns:
+        source["time"] = pd.to_numeric(source["time"], errors="coerce")
+    if "minutes_played" in source.columns:
+        source["minutes_played"] = pd.to_numeric(
+            source["minutes_played"], errors="coerce"
+        )
     source[metric_column] = pd.to_numeric(source[metric_column], errors="coerce")
     source = source[source["player"].notna()].copy()
     source = source[source["player"].astype(str).str.strip().ne("")]
     if statistic == "mean" and "date" in source.columns:
-        source["date"] = pd.to_datetime(source["date"], errors="coerce")
-        recent_dates = source["date"].dropna().drop_duplicates().nlargest(4)
-        if not recent_dates.empty:
+        source["date"] = pd.to_datetime(
+            source["date"], errors="coerce", format="mixed"
+        ).dt.date
+        recent_dates = source["date"].dropna().drop_duplicates()
+        recent_dates = sorted(recent_dates, reverse=True)[:4]
+        if recent_dates:
             source = source[source["date"].isin(recent_dates)]
     if source.empty:
         return pd.DataFrame(columns=["player", "position", "baseline_target"])
-    
-    is_peak = metric_column == "max_speed"
+
     return calculate_references(source, metric_column, statistic, is_peak_metric=is_peak)
 
 
@@ -265,7 +291,13 @@ def main() -> None:
         )
     )
     st.subheader("Distribución de la carga por sesión")
-    allocations = render_allocation_controls(sessions)
+    allocations = render_allocation_controls(
+        sessions,
+        independent_exposure=is_max_speed,
+    )
+    if not is_max_speed and sum(allocations.values()) != 100:
+        st.warning("La prescripción de volumen requiere una distribución semanal del 100%.")
+        st.stop()
 
     if not isinstance(df, pd.DataFrame) or df.empty:
         st.info("Carga los datos GPS desde la página principal para calcular las referencias.")
@@ -290,13 +322,14 @@ def main() -> None:
         session_dates,
     )
     actual_by_player = actual_loads.set_index("player").to_dict("index")
+    target_column = "Target exposure" if is_max_speed else "Target weekly total"
     for _, reference in references.iterrows():
         target = float(reference["baseline_target"]) * float(load_multiplier)
         row = {
             "Player": reference["player"],
             "Position": reference["position"],
             f"Reference ({unit})": round(float(reference["baseline_target"]), 2),
-            "Target weekly total": round(target, 2),
+            target_column: round(target, 2),
         }
         for session, allocation in allocations.items():
             row[session] = round(target * allocation / 100, 2)
@@ -308,7 +341,7 @@ def main() -> None:
         "Player",
         "Position",
         f"Reference ({unit})",
-        "Target weekly total",
+        target_column,
         *session_columns,
     ]
     editor_data = pd.DataFrame(editor_rows, columns=editor_columns)
@@ -324,9 +357,10 @@ def main() -> None:
             "Player",
             "Position",
             f"Reference ({unit})",
+            target_column,
         ],
         column_config={
-            "Target weekly total": st.column_config.NumberColumn(
+            target_column: st.column_config.NumberColumn(
                 "Target Prescrito", min_value=0, step=1, format="%.2f"
             ),
             **{
@@ -341,18 +375,21 @@ def main() -> None:
 
     if not edited.empty:
         edited = edited.copy()
-        edited["Prescribed weekly load"] = edited[session_columns].sum(axis=1)
+        if is_max_speed:
+            edited["Prescribed weekly load"] = edited[session_columns].max(axis=1)
+        else:
+            edited["Prescribed weekly load"] = edited[session_columns].sum(axis=1)
         edited["Target Prescrito"] = edited["Prescribed weekly load"].round(2)
-        edited["Carga Real GPS"] = (
-            edited["Player"]
-            .map(
-                {
-                    player: sum(values.values())
-                    for player, values in actual_by_player.items()
-                }
+        actual_totals = {
+            player: (
+                max(values.values(), default=0.0)
+                if is_max_speed
+                else sum(values.values())
             )
-            .fillna(0.0)
-            .round(2)
+            for player, values in actual_by_player.items()
+        }
+        edited["Carga Real GPS"] = (
+            edited["Player"].map(actual_totals).fillna(0.0).round(2)
         )
         edited["% Cumplimiento"] = (
             edited["Carga Real GPS"]
