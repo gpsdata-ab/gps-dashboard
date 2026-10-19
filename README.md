@@ -1,6 +1,6 @@
 # ⚽ CE Europa - Sistema de Análisis GPS v2.5.0
 
-Aplicación de Streamlit para visualización y análisis de datos GPS del CE Europa, con carga centralizada desde Google Drive y vistas específicas para equipo, jugador y GPS UBIKO.
+Aplicación de Streamlit para visualización y análisis de datos GPS del CE Europa, con carga centralizada desde Google Drive y vistas específicas para equipo y jugador.
 
 ## ✨ Características
 
@@ -8,7 +8,6 @@ Aplicación de Streamlit para visualización y análisis de datos GPS del CE Eur
 - 📁 **Integración con Google Drive** (carga automática de datos)
 - 📊 **Análisis por equipo** centrado en contexto de partido
 - 👤 **Análisis individual** con evolución temporal y comparativas
-- 📍 **Vista GPS UBIKO** con seguimiento individual avanzado y comparativas frente a equipo y posición
 - 📈 **Referencias normalizadas** a 94 minutos
 - 📄 **Exportación a PDF** de informes individuales
 - 🎨 **Interfaz moderna** con sidebar auto-ocultable
@@ -23,9 +22,8 @@ Europa_APP/
 ├── requirements.txt                # Dependencias Python
 │
 ├── pages/                          # Páginas Streamlit
-│   ├── 2_📊_Equipo.py             # Análisis de equipo
-│   ├── 3_👤_Individual.py         # Análisis individual
-│   └── 4_GPS_UBIKO.py            # Vista avanzada de GPS UBIKO
+│   ├── 1_📋_Prescripción_de_la_carga.py # Prescripción de la carga
+│   └── 2_📊_Análisis_de_partidos.py     # Análisis de partidos
 │
 ├── utils/                          # Módulos de utilidades
 │   ├── __init__.py                # Exports principales
@@ -39,7 +37,6 @@ Europa_APP/
 │   ├── plantilla.py               # Gestión de plantilla de jugadores
 │   ├── minutaje_labels.py         # Etiquetas y reglas de minutos
 │   ├── visualizations.py          # Gráficos y fotos
-│   ├── ubiko_gps.py               # Utilidades específicas de UBIKO
 │   └── pdf_*.py                   # Generadores de PDF
 │
 ├── .streamlit/
@@ -226,13 +223,6 @@ client_x509_cert_url = "https://www.googleapis.com/robot/v1/metadata/x509/tu-ser
 - Exportación a PDF de informes personalizados
 - Foto del jugador cuando está disponible
 
-#### **📍 GPS UBIKO**
-- Vista específica para sesiones GPS UBIKO
-- Comparación del jugador frente al equipo y su posición
-- Tipo de sesión con multiselección, incluyendo `Todas` y `Todas menos partido`
-- Gráfico principal con marcadores de partido y referencias visuales
-- Ranking y comparativas por fecha
-
 ---
 
 ## 🛠️ Tecnologías
@@ -349,7 +339,6 @@ pip install -r requirements.txt --force-reinstall
 
 ## 📈 Roadmap
 
-- [ ] Seguir refinando la vista GPS UBIKO
 - [ ] Mejorar la documentación funcional y técnica
 - [ ] Añadir más automatismos de validación de datos
 - [ ] Incorporar nuevas vistas comparativas si el flujo del staff lo requiere
