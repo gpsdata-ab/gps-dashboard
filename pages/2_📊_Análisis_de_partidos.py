@@ -28,6 +28,7 @@ from utils.filtros import (
     render_filtro_partidos,
     filtrar_solo_partidos,
 )
+from utils.player_colors import build_player_color_map, get_player_color
 
 # Configuración
 st.set_page_config(
@@ -78,6 +79,7 @@ def main():
     if df is None or len(df) == 0:
         st.error("⚠️ Error: datos no disponibles")
         st.stop()
+    player_color_map = build_player_color_map(df['player'].dropna())
     
     # ========================================
     # FILTRO DE PARTIDOS
@@ -345,7 +347,7 @@ def main():
         return valores.mean()
     
     def aplicar_filtro_minutos(df_in, nivel_analisis_local):
-        # Regla >60' solo para vista TOTAL en Equipo/Posiciones.
+        # Regla >60' solo para agregados de Equipo/Posiciones en vista TOTAL.
         # En mitades, aplicar >60' vacía el resultado (minutos por tramo suelen ser <60).
         if nivel_analisis_local in ['Equipo', 'Por posiciones'] and filtro_parte == "Total":
             return df_in[df_in['time'] > 60]
@@ -394,9 +396,7 @@ def main():
                     })
 
         elif nivel_local == 'Individual':
-            colores_individuales = ['#1E88E5', '#FF6F00', '#43A047', '#E53935', '#8E24AA', '#00ACC1']
-
-            for idx, jugador in enumerate(jugadores_sel):
+            for jugador in jugadores_sel:
                 for fecha in fechas_disponibles_local:
                     df_jug_fecha_base = df_base[
                         (df_base['player'] == jugador) &
@@ -419,7 +419,7 @@ def main():
                             'nombre': nombre_serie,
                             'valor': valor,
                             'minutaje': df_jug_fecha['time'].mean(),
-                            'color': colores_individuales[idx % len(colores_individuales)],
+                            'color': get_player_color(player_color_map, jugador),
                             'grupo': nombre_serie
                         })
 
@@ -430,13 +430,11 @@ def main():
                 'Delantero': '#22c55e'
             }
 
-            colores_individuales = ['#1E88E5', '#FF6F00', '#43A047', '#E53935', '#8E24AA', '#00ACC1']
-
             if len(posiciones_sel) == 1:
                 # UNA SOLA POSICIÓN: barras por jugador
                 jugadores_posicion = sorted(df_base['player'].unique())
 
-                for idx, jugador in enumerate(jugadores_posicion):
+                for jugador in jugadores_posicion:
                     for fecha in fechas_disponibles_local:
                         df_jug_fecha_base = df_base[
                             (df_base['player'] == jugador) &
@@ -447,7 +445,6 @@ def main():
                             subgrupos = list(df_jug_fecha_base.groupby('tramo_partido'))
 
                         for tramo_key, df_jug_fecha in subgrupos:
-                            df_jug_fecha = aplicar_filtro_minutos(df_jug_fecha, nivel_local)
                             if len(df_jug_fecha) == 0:
                                 continue
                             valor = calcular_estadistico(df_jug_fecha[metrica_objetivo], estadistico)
@@ -461,7 +458,7 @@ def main():
                                 'nombre': nombre_serie,
                                 'valor': valor,
                                 'minutaje': minutaje,
-                                'color': colores_individuales[idx % len(colores_individuales)],
+                                'color': get_player_color(player_color_map, jugador),
                                 'grupo': nombre_serie
                             })
             else:

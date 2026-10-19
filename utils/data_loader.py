@@ -56,7 +56,7 @@ def mapear_datos_con_plantilla(df_gps, df_plantilla, columna_jugador="player"):
     gps = df_gps.copy()
     roster = df_plantilla[list(required)].copy()
     # A frame loaded by the main app already carries the bridge key. Reusing
-    # it makes this function safe when UBIKO prepares that same frame again.
+    # it makes this function safe when mapping that frame again.
     bridge_column = "Jugador GPS" if "Jugador GPS" in gps.columns else columna_jugador
     gps["_player_key"] = gps[bridge_column].map(normalizar_nombre_jugador)
     roster["_player_key"] = roster["Jugador GPS"].map(normalizar_nombre_jugador)

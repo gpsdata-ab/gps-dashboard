@@ -256,7 +256,6 @@ def main():
             
             - **📊 Análisis de partidos:** Player Cards y análisis del partido
             - **📊 Estatus del Equipo:** <span class="new-badge">NUEVO</span> Vista panorámica con gráficos avanzados
-            - **📍 GPS UBIKO:** <span class="new-badge">NUEVO</span> Control real de carga por jugador con CSV Ubiko
             
             ---
             
