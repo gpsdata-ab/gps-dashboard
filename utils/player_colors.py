@@ -1,9 +1,30 @@
-"""Stable colors for player-specific visualizations."""
+"""Clearly distinguishable colors for player-specific visualizations.
 
-import colorsys
-import hashlib
+Colors are assigned per chart, to the players actually shown, from a
+high-contrast categorical palette. The first ten players get ten clearly
+different colors; beyond that the palette repeats with a hatch pattern so
+every bar remains identifiable.
+"""
+
 import unicodedata
 from collections.abc import Iterable
+
+# D3 / Tableau "category10": ten saturated hues designed to be told apart
+# on a white background, in this order.
+DISTINCT_PALETTE = [
+    "#1F77B4",  # azul
+    "#FF7F0E",  # naranja
+    "#2CA02C",  # verde
+    "#D62728",  # rojo
+    "#9467BD",  # morado
+    "#8C564B",  # marrón
+    "#E377C2",  # rosa
+    "#7F7F7F",  # gris
+    "#BCBD22",  # oliva
+    "#17BECF",  # cian
+]
+# Pattern used for each pass over the palette ("" = solid bar).
+OVERFLOW_PATTERNS = ["", "/", "x", ".", "+", "\\"]
 
 
 def _player_key(player: object) -> str:
@@ -11,35 +32,26 @@ def _player_key(player: object) -> str:
     return "".join(char for char in value if not unicodedata.combining(char)).casefold()
 
 
-def build_player_color_map(players: Iterable[object]) -> dict[str, str]:
-    """Return a deterministic, collision-free color for each player name."""
-    keys = sorted({_player_key(player) for player in players} - {""})
-    colors: dict[str, str] = {}
-    used_colors: set[str] = set()
+def build_player_style_map(players: Iterable[object]) -> dict[str, tuple[str, str]]:
+    """Return a distinct ``(color, pattern)`` per player, in the given order.
 
-    for key in keys:
-        attempt = 0
-        while True:
-            seed = key if attempt == 0 else f"{key}\0{attempt}"
-            digest = hashlib.sha256(seed.encode("utf-8")).digest()
-            hue = int.from_bytes(digest[:4], "big") / 2**32
-            saturation = 0.68 + digest[4] / 255 * 0.18
-            value = 0.82 + digest[5] / 255 * 0.16
-            red, green, blue = colorsys.hsv_to_rgb(hue, saturation, value)
-            color = "#{:02X}{:02X}{:02X}".format(
-                round(red * 255),
-                round(green * 255),
-                round(blue * 255),
-            )
-            if color not in used_colors:
-                colors[key] = color
-                used_colors.add(color)
-                break
-            attempt += 1
-
-    return colors
+    Pass only the players that appear in the chart so the palette is spent
+    on them; duplicates and empty names are ignored.
+    """
+    styles: dict[str, tuple[str, str]] = {}
+    for player in players:
+        key = _player_key(player)
+        if not key or key in styles:
+            continue
+        index = len(styles)
+        color = DISTINCT_PALETTE[index % len(DISTINCT_PALETTE)]
+        pattern = OVERFLOW_PATTERNS[
+            (index // len(DISTINCT_PALETTE)) % len(OVERFLOW_PATTERNS)
+        ]
+        styles[key] = (color, pattern)
+    return styles
 
 
-def get_player_color(color_map: dict[str, str], player: object) -> str:
-    """Look up a player's color using the same normalization as the map builder."""
-    return color_map[_player_key(player)]
+def get_player_style(style_map: dict[str, tuple[str, str]], player: object) -> tuple[str, str]:
+    """Look up a player's ``(color, pattern)`` using the map's normalization."""
+    return style_map[_player_key(player)]

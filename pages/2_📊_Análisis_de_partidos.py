@@ -28,7 +28,7 @@ from utils.filtros import (
     render_filtro_partidos,
     filtrar_solo_partidos,
 )
-from utils.player_colors import build_player_color_map, get_player_color
+from utils.player_colors import build_player_style_map, get_player_style
 
 # Configuración
 st.set_page_config(
@@ -79,8 +79,7 @@ def main():
     if df is None or len(df) == 0:
         st.error("⚠️ Error: datos no disponibles")
         st.stop()
-    player_color_map = build_player_color_map(df['player'].dropna())
-    
+
     # ========================================
     # FILTRO DE PARTIDOS
     # ========================================
@@ -392,11 +391,15 @@ def main():
                         'valor': valor,
                         'minutaje': minutaje_promedio,
                         'color': COLORES['primario'],
+                        'pattern': '',
                         'grupo': nombre_serie
                     })
 
         elif nivel_local == 'Individual':
+            # Paleta asignada sólo a los jugadores del gráfico para máximo contraste.
+            estilos_jugadores = build_player_style_map(jugadores_sel)
             for jugador in jugadores_sel:
+                color_jugador, patron_jugador = get_player_style(estilos_jugadores, jugador)
                 for fecha in fechas_disponibles_local:
                     df_jug_fecha_base = df_base[
                         (df_base['player'] == jugador) &
@@ -419,7 +422,8 @@ def main():
                             'nombre': nombre_serie,
                             'valor': valor,
                             'minutaje': df_jug_fecha['time'].mean(),
-                            'color': get_player_color(player_color_map, jugador),
+                            'color': color_jugador,
+                            'pattern': patron_jugador,
                             'grupo': nombre_serie
                         })
 
@@ -433,8 +437,11 @@ def main():
             if len(posiciones_sel) == 1:
                 # UNA SOLA POSICIÓN: barras por jugador
                 jugadores_posicion = sorted(df_base['player'].unique())
+                # Paleta asignada sólo a los jugadores de la posición para máximo contraste.
+                estilos_jugadores = build_player_style_map(jugadores_posicion)
 
                 for jugador in jugadores_posicion:
+                    color_jugador, patron_jugador = get_player_style(estilos_jugadores, jugador)
                     for fecha in fechas_disponibles_local:
                         df_jug_fecha_base = df_base[
                             (df_base['player'] == jugador) &
@@ -458,7 +465,8 @@ def main():
                                 'nombre': nombre_serie,
                                 'valor': valor,
                                 'minutaje': minutaje,
-                                'color': get_player_color(player_color_map, jugador),
+                                'color': color_jugador,
+                                'pattern': patron_jugador,
                                 'grupo': nombre_serie
                             })
             else:
@@ -489,6 +497,7 @@ def main():
                                 'valor': valor,
                                 'minutaje': minutaje_promedio,
                                 'color': colores_posicion[posicion],
+                                'pattern': '',
                                 'grupo': nombre_serie
                             })
 
@@ -598,7 +607,10 @@ def main():
                 x=df_grupo['fecha_label'],
                 y=df_grupo['valor'],
                 name=nombre,
-                marker_color=df_grupo['color'].iloc[0],
+                marker=dict(
+                    color=df_grupo['color'].iloc[0],
+                    pattern_shape=df_grupo['pattern'].iloc[0] if 'pattern' in df_grupo else '',
+                ),
                 hovertemplate=(
                     '<b>%{customdata[0]}</b><br>' +
                     f'{nombre}<br>' +

@@ -59,6 +59,7 @@ from .reference_engine import (
     map_microcycle_dates,
     aggregate_actual_loads,
     calculate_references,
+    keep_total_rows,
 )
 
 __all__ = [
@@ -115,5 +116,6 @@ __all__ = [
     'get_microcycle_structure',
     'map_microcycle_dates',
     'aggregate_actual_loads',
-    'calculate_references'
+    'calculate_references',
+    'keep_total_rows',
 ]
