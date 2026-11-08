@@ -19,16 +19,48 @@ def get_microcycle_structure(num_sessions: int) -> list[str]:
     return [f"MD-{i}" for i in range(num_sessions, 0, -1)] + ["MD+1"]
 
 
+def _match_day_offset(session: str) -> int:
+    """Return the day offset encoded in a label: 'MD-3' -> -3, 'MD+1' -> 1."""
+    try:
+        return int(session.strip().upper().removeprefix("MD"))
+    except ValueError as error:
+        raise ValueError(f"Invalid match-day label: {session!r}") from error
+
+
 def map_microcycle_dates(
-    start_date: date | datetime | str,
+    match_date: date | datetime | str,
     sessions: list[str],
 ) -> dict[str, date]:
-    """Map sessions to consecutive calendar dates starting at MD-N and ending at MD+1."""
-    selected_date = pd.Timestamp(start_date).date()
+    """Map each MD±k session to its calendar date relative to the match.
+
+    MD-k is always k days before the match and MD+1 the day after it, so
+    rest days inside the microcycle are handled implicitly.
+    """
+    match_day = pd.Timestamp(match_date).date()
     return {
-        session: selected_date + timedelta(days=offset)
-        for offset, session in enumerate(sessions)
+        session: match_day + timedelta(days=_match_day_offset(session))
+        for session in sessions
     }
+
+
+def keep_total_rows(df: pd.DataFrame) -> pd.DataFrame:
+    """Keep each player-day's 'Total' rows and drop the partial rows they include.
+
+    GPS exports repeat the data of a day as partial rows (match halves,
+    training drills) plus a 'Total' row with their sum. Player-days that
+    have no 'Total' row keep all their rows so nothing is lost.
+    """
+    if df.empty or not {"player", "date", "task"}.issubset(df.columns):
+        return df.copy()
+    day = pd.to_datetime(df["date"], errors="coerce", format="mixed").dt.normalize()
+    is_total = df["task"].astype(str).str.contains(r"\btotal\b", case=False, regex=True)
+    has_total = (
+        is_total.groupby([df["player"], day], dropna=False)
+        .transform("any")
+        .fillna(False)
+        .astype(bool)
+    )
+    return df[is_total | ~has_total].copy()
 
 
 def aggregate_actual_loads(
@@ -36,22 +68,26 @@ def aggregate_actual_loads(
     players: pd.Series,
     metric: str,
     session_dates: dict[str, date],
+    missing_value: float = 0.0,
 ) -> pd.DataFrame:
     """Sum a metric per player for the exact date mapped to each session.
 
-    Missing dates and missing player records are represented by ``0.0``.
+    Players without a record on a session date get ``missing_value``
+    (``0.0`` by default; pass ``float("nan")`` to tell "no data" apart
+    from a real zero).
     """
     result = pd.DataFrame({"player": players.drop_duplicates().tolist()})
     if result.empty:
         return result
 
     for session in session_dates:
-        result[f"Actual {session}"] = 0.0
+        result[f"Actual {session}"] = missing_value
 
     if "player" not in df.columns or "date" not in df.columns or metric not in df.columns:
         return result
 
-    source = df[["player", "date", metric]].copy()
+    # Count each day once: the 'Total' row already includes its drills.
+    source = keep_total_rows(df)[["player", "date", metric]].copy()
     source["date"] = pd.to_datetime(
         source["date"], errors="coerce", format="mixed"
     ).dt.date
@@ -67,7 +103,7 @@ def aggregate_actual_loads(
             totals = matching.groupby("player", dropna=False)[metric].sum()
 
         result[f"Actual {session}"] = (
-            result["player"].map(totals).fillna(0.0).astype(float)
+            result["player"].map(totals).fillna(missing_value).astype(float)
         )
     return result
 

@@ -1,7 +1,11 @@
-"""Bloque A: prescription of the weekly training load."""
+"""Bloque A: prescription of the training load relative to match demands.
+
+Every session target is expressed as a percentage of the player's match
+reference (MD = 100%), never as a share of a weekly total.
+"""
 
 import sys
-from datetime import date, timedelta
+from datetime import date
 from pathlib import Path
 
 import pandas as pd
@@ -16,6 +20,7 @@ from utils.reference_engine import (
     aggregate_actual_loads,
     calculate_references,
     get_microcycle_structure,
+    keep_total_rows,
     map_microcycle_dates,
 )
 
@@ -32,6 +37,19 @@ STATISTIC_OPTIONS = {
     "Percentil 70": "p70",
 }
 LOAD_VALUES = [0.8, 0.9, 1.0, 1.1, 1.2, 1.3]
+
+# Default session targets as % of the match reference. Orientative values
+# for a one-match week; the staff adjusts them in the page.
+DEFAULT_MATCH_PCT_VOLUME = {
+    "MD-6": 20, "MD-5": 40, "MD-4": 30, "MD-3": 65,
+    "MD-2": 30, "MD-1": 15, "MD+1": 20,
+}
+DEFAULT_MATCH_PCT_PEAK = {
+    "MD-6": 85, "MD-5": 85, "MD-4": 85, "MD-3": 90,
+    "MD-2": 95, "MD-1": 85, "MD+1": 0,
+}
+MAX_MATCH_PCT_VOLUME = 150
+MAX_MATCH_PCT_PEAK = 110
 
 
 st.set_page_config(
@@ -56,78 +74,37 @@ def inject_styles() -> None:
         }
         .prescription-hero h1 { margin: 0; }
         .prescription-hero p { margin: .35rem 0 0; opacity: .82; }
-        .status-card {
-            border-radius: 12px;
-            padding: .8rem 1rem;
-            color: white;
-            min-height: 88px;
-        }
-        .status-card strong { display: block; font-size: 1.15rem; }
-        .status-card small { opacity: .9; }
-        .status-green { background: #20874c; }
-        .status-yellow { background: #b88900; }
-        .status-red { background: #b43c3c; }
         </style>
         """,
         unsafe_allow_html=True,
     )
 
 
-def default_allocations(
-    sessions: list[str],
-    independent_exposure: bool = False,
-) -> dict[str, int]:
-    """Create default allocation percentages in 5-point increments."""
-    if not sessions:
-        return {}
-    if independent_exposure:
-        return {session: 100 for session in sessions}
-
-    allocations = {session: 5 for session in sessions}
-    remaining = 100 - sum(allocations.values())
-    for session in reversed(sessions):
-        increment = min(remaining, 80 - allocations[session])
-        allocations[session] += increment
-        remaining -= increment
-        if remaining == 0:
-            break
-    return allocations
-
-
-def render_allocation_controls(
-    sessions: list[str],
-    independent_exposure: bool = False,
-) -> dict[str, int]:
-    """Render one percentage input per session and return current values."""
-    defaults = default_allocations(sessions, independent_exposure)
-    values: dict[str, int] = {}
+def render_match_pct_controls(sessions: list[str], is_peak: bool) -> dict[str, int]:
+    """Render one '% of match' input per session and return current values."""
+    defaults = DEFAULT_MATCH_PCT_PEAK if is_peak else DEFAULT_MATCH_PCT_VOLUME
+    max_pct = MAX_MATCH_PCT_PEAK if is_peak else MAX_MATCH_PCT_VOLUME
+    mode = "peak" if is_peak else "volume"
     session_key = "_".join(sessions)
-    allocation_mode = "exposure" if independent_exposure else "weekly"
-    columns = st.columns(len(sessions))
-    for column, session in zip(columns, sessions):
+    values: dict[str, int] = {}
+    for column, session in zip(st.columns(len(sessions)), sessions):
         with column:
             values[session] = st.number_input(
-                session,
-                min_value=50 if independent_exposure else 5,
-                max_value=100 if independent_exposure else 80,
-                value=int(defaults[session]),
+                f"{session} (% partido)",
+                min_value=0,
+                max_value=max_pct,
+                value=int(defaults.get(session, 0)),
                 step=5,
-                key=f"prescription_allocation_{allocation_mode}_{session_key}_{session}",
+                key=f"prescription_match_pct_{mode}_{session_key}_{session}",
                 help=(
-                    "Porcentaje independiente de exposición para esta sesión."
-                    if independent_exposure
-                    else "Porcentaje de la carga semanal asignado a esta sesión."
+                    "Objetivo de la sesión como % de la referencia de partido "
+                    "del jugador (partido = 100%)."
                 ),
             )
-    total = sum(values.values())
-    if independent_exposure:
-        st.caption("Exposición por sesión independiente (50–100%).")
-    elif total != 100:
-        st.warning(
-            f"La distribución actual suma {total}%. Ajusta las sesiones para llegar a 100%."
-        )
-    else:
-        st.caption("Distribución semanal: 100%")
+    st.caption(
+        "Cada sesión se prescribe en relación al partido (100%), "
+        "no como reparto de un total semanal."
+    )
     return values
 
 
@@ -136,28 +113,38 @@ def _reference_frame(
     metric_column: str,
     statistic: str,
 ) -> pd.DataFrame:
-    """Calculate player references from match records only."""
+    """Calculate player references from full-match records only.
+
+    Each player-match counts once: the 'Total' row is used, and halves are
+    only added up when a match has no 'Total' row for that player.
+    """
     source = filtrar_solo_partidos(df)
     is_peak = metric_column == "max_speed"
-    required = {"player", "position", metric_column}
+    required = {"player", "position", "date", metric_column}
     if not is_peak and not {"minutes_played", "time"}.intersection(source.columns):
         return pd.DataFrame(columns=["player", "position", "baseline_target"])
     if not required.issubset(source.columns):
         return pd.DataFrame(columns=["player", "position", "baseline_target"])
-    source = source.copy()
-    if "time" in source.columns:
-        source["time"] = pd.to_numeric(source["time"], errors="coerce")
-    if "minutes_played" in source.columns:
-        source["minutes_played"] = pd.to_numeric(
-            source["minutes_played"], errors="coerce"
-        )
-    source[metric_column] = pd.to_numeric(source[metric_column], errors="coerce")
+    source = keep_total_rows(source)
+    minute_columns = [
+        column for column in ("time", "minutes_played") if column in source.columns
+    ]
+    for column in [*minute_columns, metric_column]:
+        source[column] = pd.to_numeric(source[column], errors="coerce")
     source = source[source["player"].notna()].copy()
     source = source[source["player"].astype(str).str.strip().ne("")]
-    if statistic == "mean" and "date" in source.columns:
-        source["date"] = pd.to_datetime(
-            source["date"], errors="coerce", format="mixed"
-        ).dt.date
+    source["date"] = pd.to_datetime(
+        source["date"], errors="coerce", format="mixed"
+    ).dt.date
+    # One row per player and match (halves summed only when 'Total' is missing).
+    source = source.groupby(["player", "date"], as_index=False).agg(
+        {
+            metric_column: "max" if is_peak else "sum",
+            "position": "first",
+            **{column: "sum" for column in minute_columns},
+        }
+    )
+    if statistic == "mean":
         recent_dates = source["date"].dropna().drop_duplicates()
         recent_dates = sorted(recent_dates, reverse=True)[:4]
         if recent_dates:
@@ -172,39 +159,22 @@ def _metric_unit(metric_label: str) -> str:
     return "km/h" if metric_label == "Max speed" else "m"
 
 
-def _status(ratio: float) -> tuple[str, str, str]:
-    if ratio < 0.9:
-        return "Subóptimo", "status-yellow", "🟡"
-    if ratio <= 1.1:
-        return "Óptimo", "status-green", "🟢"
-    return "Sobre-óptimo", "status-red", "🔴"
+def _status(compliance_pct: float) -> tuple[str, str]:
+    """Traffic-light label and icon for a session compliance percentage."""
+    if compliance_pct < 90:
+        return "Subóptimo", "🟡"
+    if compliance_pct <= 110:
+        return "Óptimo", "🟢"
+    return "Sobre-óptimo", "🔴"
 
 
-def render_semáforo(editor_data: pd.DataFrame) -> None:
-    """Render weekly completion cards for the edited prescriptions."""
-    st.subheader("Semáforo de cumplimiento semanal")
-    if editor_data.empty:
-        st.info("No hay jugadores disponibles para mostrar el semáforo.")
-        return
-
-    cards = []
-    for _, row in editor_data.iterrows():
-        compliance = float(row["% Cumplimiento"])
-        ratio = compliance / 100
-        label, css_class, icon = _status(ratio)
-        cards.append(
-            f'<div class="status-card {css_class}">'
-            f"<strong>{icon} {row['Player']}</strong>"
-            f"<small>{label} · {compliance:.1f}% · "
-            f"GPS {float(row['Carga Real GPS']):.2f} / "
-            f"{float(row['Target Prescrito']):.2f}</small>"
-            "</div>"
-        )
-
-    columns = st.columns(min(4, len(cards)))
-    for index, card in enumerate(cards):
-        with columns[index % len(columns)]:
-            st.markdown(card, unsafe_allow_html=True)
+def _semaforo_cell(prescribed: float, actual: float) -> str:
+    if pd.isna(actual):
+        return "⚪ Sin datos"
+    if pd.isna(prescribed) or prescribed <= 0:
+        return "— Sin objetivo"
+    compliance = actual / prescribed * 100
+    return f"{_status(compliance)[1]} {compliance:.0f}%"
 
 
 def main() -> None:
@@ -216,7 +186,7 @@ def main() -> None:
     inject_styles()
     st.markdown(
         '<div class="prescription-hero"><h1>📋 Prescripción de la carga</h1>'
-        "<p>Bloque A · Planificación de la carga semanal por jugador y sesión</p>"
+        "<p>Bloque A · Carga de cada sesión en relación a la exigencia del partido</p>"
         "</div>",
         unsafe_allow_html=True,
     )
@@ -224,12 +194,11 @@ def main() -> None:
     df = st.session_state.get("df_procesado")
     latest_match_date = None
     if isinstance(df, pd.DataFrame) and "date" in df.columns:
-        parsed_dates = pd.to_datetime(df["date"], errors="coerce").dropna()
+        match_rows = filtrar_solo_partidos(df)
+        parsed_dates = pd.to_datetime(match_rows["date"], errors="coerce").dropna()
         if not parsed_dates.empty:
             latest_match_date = parsed_dates.max().date()
-    default_start_date = latest_match_date or (
-        date.today() - timedelta(days=date.today().weekday())
-    )
+    default_match_date = latest_match_date or date.today()
 
     st.subheader("Configuración del microciclo")
     control_columns = st.columns(5)
@@ -246,13 +215,13 @@ def main() -> None:
             options=list(METRIC_OPTIONS),
             key="prescription_metric",
         )
-    
+
     is_max_speed = metric_label == "Max speed"
 
     with control_columns[2]:
         if is_max_speed:
             statistic_label = st.selectbox(
-                "Estadístico",
+                "Referencia de partido",
                 options=["Pico máximo"],
                 disabled=True,
                 key="prescription_statistic_max_speed",
@@ -260,17 +229,18 @@ def main() -> None:
             )
         else:
             statistic_label = st.selectbox(
-                "Estadístico",
+                "Referencia de partido",
                 options=list(STATISTIC_OPTIONS),
                 key="prescription_statistic",
+                help="Estadístico de los partidos del jugador que define el 100%.",
             )
-            
+
     with control_columns[3]:
-        microcycle_start = st.date_input(
-            "Inicio microciclo",
-            value=default_start_date,
-            key="prescription_microcycle_start",
-            help="Fecha de inicio del microciclo (MD-N). Las sesiones avanzan hasta MD+1 al final.",
+        match_date = st.date_input(
+            "Fecha del partido (MD)",
+            value=default_match_date,
+            key="prescription_match_date",
+            help="Las sesiones se sitúan respecto al partido: MD-k = k días antes, MD+1 = día siguiente.",
         )
     with control_columns[4]:
         load_multiplier = st.selectbox(
@@ -279,155 +249,176 @@ def main() -> None:
             index=2,
             format_func=lambda value: f"{value:.1f}",
             key="prescription_load_multiplier",
+            help="Ajuste global sobre la referencia de partido (1.0 = partido).",
         )
 
     sessions = get_microcycle_structure(num_sessions)
-    session_dates = map_microcycle_dates(microcycle_start, sessions)
+    session_dates = map_microcycle_dates(match_date, sessions)
     st.caption(
         "Calendario: "
         + " · ".join(
             f"{session}: {session_dates[session].strftime('%d/%m/%Y')}"
             for session in sessions
         )
+        + f" · Partido: {pd.Timestamp(match_date).strftime('%d/%m/%Y')}"
     )
-    st.subheader("Distribución de la carga por sesión")
-    allocations = render_allocation_controls(
-        sessions,
-        independent_exposure=is_max_speed,
-    )
-    if not is_max_speed and sum(allocations.values()) != 100:
-        st.warning("La prescripción de volumen requiere una distribución semanal del 100%.")
-        st.stop()
 
+    st.subheader("Carga de cada sesión respecto al partido")
+    match_pct = render_match_pct_controls(sessions, is_peak=is_max_speed)
+
+    metric_column = METRIC_OPTIONS[metric_label]
     if not isinstance(df, pd.DataFrame) or df.empty:
         st.info("Carga los datos GPS desde la página principal para calcular las referencias.")
         references = pd.DataFrame(columns=["player", "position", "baseline_target"])
     else:
         references = _reference_frame(
-            df,
-            METRIC_OPTIONS[metric_label],
-            STATISTIC_OPTIONS[statistic_label],
+            df, metric_column, STATISTIC_OPTIONS[statistic_label]
         )
         if references.empty:
-            st.warning(
-                f"No existe la columna '{METRIC_OPTIONS[metric_label]}' en los datos cargados."
-            )
+            st.warning(f"No existe la columna '{metric_column}' en los datos cargados.")
 
     unit = _metric_unit(metric_label)
+    reference_column = f"Referencia partido ({unit})"
+    target_column = f"Objetivo partido ({unit})"
+
     editor_rows = []
-    actual_loads = aggregate_actual_loads(
-        df if isinstance(df, pd.DataFrame) else pd.DataFrame(),
-        references["player"],
-        METRIC_OPTIONS[metric_label],
-        session_dates,
-    )
-    actual_by_player = actual_loads.set_index("player").to_dict("index")
-    target_column = "Target exposure" if is_max_speed else "Target weekly total"
     for _, reference in references.iterrows():
-        target = float(reference["baseline_target"]) * float(load_multiplier)
+        match_reference = float(reference["baseline_target"])
+        match_target = match_reference * float(load_multiplier)
         row = {
             "Player": reference["player"],
             "Position": reference["position"],
-            f"Reference ({unit})": round(float(reference["baseline_target"]), 2),
-            target_column: round(target, 2),
+            reference_column: round(match_reference, 2),
+            target_column: round(match_target, 2),
         }
-        for session, allocation in allocations.items():
-            row[session] = round(target * allocation / 100, 2)
+        for session in sessions:
+            row[session] = round(match_target * match_pct[session] / 100, 2)
         editor_rows.append(row)
+    editor_data = pd.DataFrame(
+        editor_rows,
+        columns=["Player", "Position", reference_column, target_column, *sessions],
+    )
 
-    session_columns = list(allocations)
-    session_key = "_".join(session_columns)
-    editor_columns = [
-        "Player",
-        "Position",
-        f"Reference ({unit})",
-        target_column,
-        *session_columns,
-    ]
-    editor_data = pd.DataFrame(editor_rows, columns=editor_columns)
     st.subheader("Editor de prescripción individual")
     st.caption(
-        "Edita el objetivo semanal o cualquier sesión para adaptar la carga a casos de Return to Play y fatiga."
+        f"Objetivo por sesión en {unit}. Edita cualquier celda para adaptar la carga "
+        "a casos de Return to Play y fatiga."
+    )
+    # The key includes every input that changes the base values, so manual
+    # edits never get re-applied on top of a different metric or reference.
+    editor_key = "_".join(
+        [
+            "prescription_editor",
+            metric_column,
+            STATISTIC_OPTIONS.get(statistic_label, "max"),
+            f"{load_multiplier:.1f}",
+            str(match_date),
+            *(f"{session}{match_pct[session]}" for session in sessions),
+        ]
     )
     edited = st.data_editor(
         editor_data,
         hide_index=True,
         use_container_width=True,
-        disabled=[
-            "Player",
-            "Position",
-            f"Reference ({unit})",
-            target_column,
-        ],
+        disabled=["Player", "Position", reference_column, target_column],
         column_config={
-            target_column: st.column_config.NumberColumn(
-                "Target Prescrito", min_value=0, step=1, format="%.2f"
-            ),
             **{
                 session: st.column_config.NumberColumn(
-                    session, min_value=0, step=1, format="%.2f"
+                    f"{session} ({match_pct[session]}%)",
+                    min_value=0,
+                    step=1,
+                    format="%.2f",
                 )
-                for session in session_columns
+                for session in sessions
             },
         },
-        key=f"prescription_editor_{session_key}",
+        key=editor_key,
     )
 
-    if not edited.empty:
-        edited = edited.copy()
-        if is_max_speed:
-            edited["Prescribed weekly load"] = edited[session_columns].max(axis=1)
-        else:
-            edited["Prescribed weekly load"] = edited[session_columns].sum(axis=1)
-        edited["Target Prescrito"] = edited["Prescribed weekly load"].round(2)
-        actual_totals = {
-            player: (
-                max(values.values(), default=0.0)
-                if is_max_speed
-                else sum(values.values())
-            )
-            for player, values in actual_by_player.items()
+    if edited.empty:
+        st.info("No hay jugadores disponibles para mostrar el cumplimiento.")
+        return
+
+    actual_loads = aggregate_actual_loads(
+        df if isinstance(df, pd.DataFrame) else pd.DataFrame(),
+        edited["Player"],
+        metric_column,
+        session_dates,
+        missing_value=float("nan"),
+    ).set_index("player")
+    actual = pd.DataFrame(
+        {
+            session: edited["Player"].map(actual_loads[f"Actual {session}"])
+            for session in sessions
         }
-        edited["Carga Real GPS"] = (
-            edited["Player"].map(actual_totals).fillna(0.0).round(2)
-        )
-        edited["% Cumplimiento"] = (
-            edited["Carga Real GPS"]
-            .div(edited["Target Prescrito"].where(
-                edited["Target Prescrito"].ne(0), float("nan")
-            ))
-            .fillna(0.0)
-            .mul(100)
-            .round(1)
-        )
-        edited["Estado"] = edited["% Cumplimiento"].map(
-            lambda compliance: _status(compliance / 100)[0]
-        )
-    else:
-        edited["Prescribed weekly load"] = pd.Series(dtype=float)
-        edited["Target Prescrito"] = pd.Series(dtype=float)
-        edited["Carga Real GPS"] = pd.Series(dtype=float)
-        edited["% Cumplimiento"] = pd.Series(dtype=float)
-        edited["Estado"] = pd.Series(dtype=str)
-    summary_columns = [
-        "Player",
-        "Target Prescrito",
-        "Carga Real GPS",
-        "% Cumplimiento",
-        "Estado",
-    ]
-    st.subheader("Resumen de cumplimiento")
-    st.dataframe(
-        edited[summary_columns],
-        hide_index=True,
-        use_container_width=True,
-        column_config={
-            "Target Prescrito": st.column_config.NumberColumn(format="%.2f"),
-            "Carga Real GPS": st.column_config.NumberColumn(format="%.2f"),
-            "% Cumplimiento": st.column_config.NumberColumn(format="%.1f%%"),
-        },
     )
-    render_semáforo(edited)
+    prescribed = edited[sessions].astype(float)
+    reference = edited[reference_column].astype(float).where(lambda s: s > 0)
+
+    st.subheader("Semáforo de cumplimiento por sesión")
+    st.caption(
+        "Carga real GPS / objetivo prescrito de la sesión. "
+        "🟢 90–110% · 🟡 < 90% · 🔴 > 110% · ⚪ sin registro GPS ese día."
+    )
+    semaforo = pd.DataFrame({"Player": edited["Player"]})
+    for session in sessions:
+        semaforo[session] = [
+            _semaforo_cell(p, a) for p, a in zip(prescribed[session], actual[session])
+        ]
+    st.dataframe(semaforo, hide_index=True, use_container_width=True)
+
+    st.subheader("Carga real respecto al partido")
+    st.caption(
+        "Carga GPS de cada sesión como % de la referencia de partido del jugador "
+        "(partido = 100%). Entre paréntesis, el % prescrito."
+    )
+    real_vs_match = pd.DataFrame({"Player": edited["Player"]})
+    for session in sessions:
+        real_pct = actual[session].div(reference).mul(100)
+        prescribed_pct = prescribed[session].div(reference).mul(100)
+        real_vs_match[session] = [
+            "—" if pd.isna(r) else f"{r:.0f}% ({p:.0f}%)" if pd.notna(p) else f"{r:.0f}%"
+            for r, p in zip(real_pct, prescribed_pct)
+        ]
+    st.dataframe(real_vs_match, hide_index=True, use_container_width=True)
+
+    with st.expander("📋 Detalle por sesión"):
+        detail = []
+        for index, row in edited.iterrows():
+            for session in sessions:
+                p, a, ref = prescribed.at[index, session], actual.at[index, session], reference.at[index]
+                compliance = a / p * 100 if pd.notna(a) and p > 0 else float("nan")
+                if pd.isna(a):
+                    estado = "Sin datos"
+                elif not p > 0:
+                    estado = "Sin objetivo"
+                else:
+                    estado = _status(compliance)[0]
+                detail.append(
+                    {
+                        "Player": row["Player"],
+                        "Sesión": session,
+                        "Fecha": session_dates[session].strftime("%d/%m/%Y"),
+                        f"Prescrito ({unit})": p,
+                        f"Real GPS ({unit})": a,
+                        "Prescrito (% partido)": p / ref * 100 if pd.notna(ref) else float("nan"),
+                        "Real (% partido)": a / ref * 100 if pd.notna(ref) else float("nan"),
+                        "% Cumplimiento": compliance,
+                        "Estado": estado,
+                    }
+                )
+        st.dataframe(
+            pd.DataFrame(detail),
+            hide_index=True,
+            use_container_width=True,
+            column_config={
+                f"Prescrito ({unit})": st.column_config.NumberColumn(format="%.1f"),
+                f"Real GPS ({unit})": st.column_config.NumberColumn(format="%.1f"),
+                "Prescrito (% partido)": st.column_config.NumberColumn(format="%.0f%%"),
+                "Real (% partido)": st.column_config.NumberColumn(format="%.0f%%"),
+                "% Cumplimiento": st.column_config.NumberColumn(format="%.0f%%"),
+            },
+        )
 
 
 if __name__ == "__main__":
