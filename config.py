@@ -47,6 +47,14 @@ METRICAS_RELATIVAS = [
 MINUTOS_NORMALIZACION = 94
 MINUTOS_MINIMOS = 60  # Mínimo de minutos para incluir en referencias
 
+# Referencias de partido de "Prescripción de la carga" (partido = 100%).
+# Se pueden ajustar aquí sin tocar el resto del código.
+REFERENCIA_MINUTOS = 75            # Minutaje al que se lleva cada partido (60'-75' se escalan a 75')
+REFERENCIA_MINUTOS_MINIMOS = 60    # Partidos con menos minutos no cuentan (salvo Max speed)
+REFERENCIA_VIDA_MEDIA_DIAS = 30    # Percentil 70: un partido de hace 30 días pesa la mitad
+REFERENCIA_PICO_ANTIGUO_DIAS = 60  # Pico máximo más antiguo que esto se marca con ⚠️
+REFERENCIA_ULTIMOS_PARTIDOS = 4    # Partidos de "Promedio (últimos N partidos)"
+
 # Configuración de Streamlit
 PAGE_TITLE = "CE Europa - Análisis GPS"
 PAGE_ICON = "⚽"
