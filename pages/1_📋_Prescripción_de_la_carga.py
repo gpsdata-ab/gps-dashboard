@@ -14,9 +14,19 @@ import streamlit as st
 ROOT_DIR = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT_DIR))
 
-from config import LAYOUT, PAGE_ICON, PAGE_TITLE
+from config import (
+    LAYOUT,
+    PAGE_ICON,
+    PAGE_TITLE,
+    REFERENCIA_MINUTOS,
+    REFERENCIA_MINUTOS_MINIMOS,
+    REFERENCIA_PICO_ANTIGUO_DIAS,
+    REFERENCIA_ULTIMOS_PARTIDOS,
+    REFERENCIA_VIDA_MEDIA_DIAS,
+)
 from utils import filtrar_solo_partidos, render_sidebar
 from utils.reference_engine import (
+    REFERENCE_COLUMNS,
     aggregate_actual_loads,
     calculate_references,
     get_microcycle_structure,
@@ -33,8 +43,9 @@ METRIC_OPTIONS = {
 }
 STATISTIC_OPTIONS = {
     "Pico máximo": "max",
-    "Promedio (últimos 4 partidos)": "mean",
-    "Percentil 70": "p70",
+    f"Promedio (últimos {REFERENCIA_ULTIMOS_PARTIDOS} partidos)": "last_n",
+    "Promedio (partidos seleccionados)": "mean",
+    "Percentil 70 (más peso a lo reciente)": "p70",
 }
 LOAD_VALUES = [0.8, 0.9, 1.0, 1.1, 1.2, 1.3]
 
@@ -108,23 +119,47 @@ def render_match_pct_controls(sessions: list[str], is_peak: bool) -> dict[str, i
     return values
 
 
+def _match_catalog(df: pd.DataFrame, match_date: date) -> dict[date, str]:
+    """Matches played up to ``match_date``, newest first: {date: label}."""
+    matches = filtrar_solo_partidos(df)
+    if matches.empty or "date" not in matches.columns:
+        return {}
+    catalog = pd.DataFrame(
+        {
+            "date": pd.to_datetime(matches["date"], errors="coerce", format="mixed").dt.date,
+            "session": (
+                matches["session"].astype(str).str.strip()
+                if "session" in matches.columns
+                else "Partido"
+            ),
+        }
+    ).dropna(subset=["date"])
+    catalog = catalog[catalog["date"] <= match_date]
+    sessions = catalog.groupby("date")["session"].first().sort_index(ascending=False)
+    return {day: f"{session} · {day:%d/%m/%y}" for day, session in sessions.items()}
+
+
 def _reference_frame(
     df: pd.DataFrame,
     metric_column: str,
     statistic: str,
+    match_date: date,
+    selected_dates: list[date],
 ) -> pd.DataFrame:
     """Calculate player references from full-match records only.
 
     Each player-match counts once: the 'Total' row is used, and halves are
-    only added up when a match has no 'Total' row for that player.
+    only added up when a match has no 'Total' row for that player. Only
+    the selected matches played up to ``match_date`` are used.
     """
+    empty = pd.DataFrame(columns=REFERENCE_COLUMNS)
     source = filtrar_solo_partidos(df)
     is_peak = metric_column == "max_speed"
     required = {"player", "position", "date", metric_column}
     if not is_peak and not {"minutes_played", "time"}.intersection(source.columns):
-        return pd.DataFrame(columns=["player", "position", "baseline_target"])
+        return empty
     if not required.issubset(source.columns):
-        return pd.DataFrame(columns=["player", "position", "baseline_target"])
+        return empty
     source = keep_total_rows(source)
     minute_columns = [
         column for column in ("time", "minutes_played") if column in source.columns
@@ -141,18 +176,112 @@ def _reference_frame(
         {
             metric_column: "max" if is_peak else "sum",
             "position": "first",
+            **({"session": "first"} if "session" in source.columns else {}),
             **{column: "sum" for column in minute_columns},
         }
     )
-    if statistic == "mean":
-        recent_dates = source["date"].dropna().drop_duplicates()
-        recent_dates = sorted(recent_dates, reverse=True)[:4]
-        if recent_dates:
-            source = source[source["date"].isin(recent_dates)]
-    if source.empty:
-        return pd.DataFrame(columns=["player", "position", "baseline_target"])
+    source = source[source["date"].isin(selected_dates)]
+    # Every squad player in the GPS data is listed, so players without
+    # valid matches still get a (positional) reference.
+    squad = df[["player", "position"]].dropna(subset=["player"]).drop_duplicates("player")
+    return calculate_references(
+        source,
+        metric_column,
+        statistic,
+        is_peak_metric=is_peak,
+        reference_date=match_date,
+        players=squad,
+    )
 
-    return calculate_references(source, metric_column, statistic, is_peak_metric=is_peak)
+
+def _reference_rules_caption(is_peak: bool) -> str:
+    """Plain-language description of how the match reference is built."""
+    if is_peak:
+        minutes_rule = "Max speed usa todos los partidos, sin escalar."
+    else:
+        minutes_rule = (
+            f"Solo cuentan partidos con al menos {REFERENCIA_MINUTOS_MINIMOS}'; "
+            f"los de {REFERENCIA_MINUTOS_MINIMOS}'–{REFERENCIA_MINUTOS}' se llevan a "
+            f"{REFERENCIA_MINUTOS}' y los más largos no se reducen."
+        )
+    return (
+        "Referencia de partido: partidos seleccionados hasta la fecha MD. "
+        f"{minutes_rule} Pico máximo = mejor partido "
+        f"(⚠️ si tiene más de {REFERENCIA_PICO_ANTIGUO_DIAS} días). "
+        f"Percentil 70: un partido de hace {REFERENCIA_VIDA_MEDIA_DIAS} días cuenta la mitad. "
+        "Sin partidos válidos → media de su posición. ✏️ = referencia manual."
+    )
+
+
+def render_manual_references(
+    references: pd.DataFrame, metric_column: str, unit: str
+) -> dict[str, float]:
+    """Table to type a player's match reference by hand.
+
+    Values are kept per metric for the current app session only.
+    """
+    store = st.session_state.setdefault("prescription_manual_references", {})
+    metric_store: dict[str, float] = store.setdefault(metric_column, {})
+    manual_column = f"Referencia manual ({unit})"
+    with st.expander(
+        f"✏️ Ajuste manual de referencia ({len(metric_store)} activos)"
+        if metric_store
+        else "✏️ Ajuste manual de referencia"
+    ):
+        st.caption(
+            "Para nuevas incorporaciones, Return to Play o casos especiales. "
+            "Escribe la referencia de partido del jugador; deja la celda vacía para "
+            "usar la calculada. Se mantiene mientras la app esté abierta."
+        )
+        table = pd.DataFrame(
+            {
+                "Player": references["player"],
+                "Position": references["position"],
+                f"Referencia calculada ({unit})": pd.to_numeric(
+                    references["baseline_target"], errors="coerce"
+                ).round(2),
+                manual_column: references["player"].map(metric_store).astype(float),
+            }
+        )
+        edited = st.data_editor(
+            table,
+            hide_index=True,
+            use_container_width=True,
+            disabled=["Player", "Position", f"Referencia calculada ({unit})"],
+            column_config={
+                manual_column: st.column_config.NumberColumn(min_value=0, step=1, format="%.2f"),
+            },
+            key=f"prescription_manual_references_{metric_column}",
+        )
+    metric_store.clear()
+    metric_store.update(
+        {
+            player: float(value)
+            for player, value in zip(edited["Player"], edited[manual_column])
+            if pd.notna(value)
+        }
+    )
+    return dict(metric_store)
+
+
+def apply_manual_references(
+    references: pd.DataFrame, manual_references: dict[str, float]
+) -> pd.DataFrame:
+    """Replace calculated references with the values typed by the staff."""
+    if not manual_references or references.empty:
+        return references
+    references = references.copy()
+    for index, player in references["player"].items():
+        if player in manual_references:
+            calculated = references.at[index, "baseline_target"]
+            references.at[index, "baseline_target"] = manual_references[player]
+            references.at[index, "source"] = "manual"
+            references.at[index, "origin"] = (
+                f"✏️ Manual (calculada: {calculated:.0f})"
+                if pd.notna(calculated)
+                else "✏️ Manual"
+            )
+    return references
 
 
 def _metric_unit(metric_label: str) -> str:
@@ -263,22 +392,50 @@ def main() -> None:
         + f" · Partido: {pd.Timestamp(match_date).strftime('%d/%m/%Y')}"
     )
 
+    has_data = isinstance(df, pd.DataFrame) and not df.empty
+    match_catalog = _match_catalog(df, match_date) if has_data else {}
+    selected_dates = st.multiselect(
+        "Partidos de referencia",
+        options=list(match_catalog),
+        default=list(match_catalog),
+        format_func=match_catalog.get,
+        key=f"prescription_reference_matches_{match_date}",
+        help=(
+            "Partidos usados para calcular la referencia (todos por defecto). "
+            "Quita amistosos o partidos con datos dudosos si es necesario."
+        ),
+    )
+
     st.subheader("Carga de cada sesión respecto al partido")
     match_pct = render_match_pct_controls(sessions, is_peak=is_max_speed)
 
     metric_column = METRIC_OPTIONS[metric_label]
-    if not isinstance(df, pd.DataFrame) or df.empty:
+    unit = _metric_unit(metric_label)
+    if not has_data:
         st.info("Carga los datos GPS desde la página principal para calcular las referencias.")
-        references = pd.DataFrame(columns=["player", "position", "baseline_target"])
+        references = pd.DataFrame(columns=REFERENCE_COLUMNS)
     else:
+        if match_catalog and not selected_dates:
+            st.warning("Selecciona al menos un partido de referencia.")
         references = _reference_frame(
-            df, metric_column, STATISTIC_OPTIONS[statistic_label]
+            df, metric_column, STATISTIC_OPTIONS[statistic_label], match_date, selected_dates
         )
         if references.empty:
-            st.warning(f"No existe la columna '{metric_column}' en los datos cargados.")
+            st.warning(
+                f"No hay partidos con la métrica '{metric_column}' hasta el "
+                f"{pd.Timestamp(match_date).strftime('%d/%m/%Y')}."
+            )
+    st.subheader("Editor de prescripción individual")
+    st.caption(
+        f"Objetivo por sesión en {unit}. Edita cualquier celda para adaptar la carga "
+        "a casos de Return to Play y fatiga."
+    )
+    st.caption(_reference_rules_caption(is_max_speed))
+    manual_references = render_manual_references(references, metric_column, unit)
+    references = apply_manual_references(references, manual_references)
 
-    unit = _metric_unit(metric_label)
     reference_column = f"Referencia partido ({unit})"
+    origin_column = "Origen de la referencia"
     target_column = f"Objetivo partido ({unit})"
 
     editor_rows = []
@@ -289,6 +446,7 @@ def main() -> None:
             "Player": reference["player"],
             "Position": reference["position"],
             reference_column: round(match_reference, 2),
+            origin_column: reference["origin"],
             target_column: round(match_target, 2),
         }
         for session in sessions:
@@ -296,14 +454,11 @@ def main() -> None:
         editor_rows.append(row)
     editor_data = pd.DataFrame(
         editor_rows,
-        columns=["Player", "Position", reference_column, target_column, *sessions],
+        columns=[
+            "Player", "Position", reference_column, origin_column, target_column, *sessions,
+        ],
     )
 
-    st.subheader("Editor de prescripción individual")
-    st.caption(
-        f"Objetivo por sesión en {unit}. Edita cualquier celda para adaptar la carga "
-        "a casos de Return to Play y fatiga."
-    )
     # The key includes every input that changes the base values, so manual
     # edits never get re-applied on top of a different metric or reference.
     editor_key = "_".join(
@@ -313,6 +468,7 @@ def main() -> None:
             STATISTIC_OPTIONS.get(statistic_label, "max"),
             f"{load_multiplier:.1f}",
             str(match_date),
+            str(hash((tuple(sorted(selected_dates)), tuple(sorted(manual_references.items()))))),
             *(f"{session}{match_pct[session]}" for session in sessions),
         ]
     )
@@ -320,7 +476,7 @@ def main() -> None:
         editor_data,
         hide_index=True,
         use_container_width=True,
-        disabled=["Player", "Position", reference_column, target_column],
+        disabled=["Player", "Position", reference_column, origin_column, target_column],
         column_config={
             **{
                 session: st.column_config.NumberColumn(
