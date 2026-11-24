@@ -25,6 +25,7 @@ from config import (
     REFERENCIA_VIDA_MEDIA_DIAS,
 )
 from utils import filtrar_solo_partidos, render_sidebar
+from utils import manual_references as manual_store
 from utils.reference_engine import (
     REFERENCE_COLUMNS,
     aggregate_actual_loads,
@@ -44,7 +45,7 @@ METRIC_OPTIONS = {
 STATISTIC_OPTIONS = {
     "Pico máximo": "max",
     f"Promedio (últimos {REFERENCIA_ULTIMOS_PARTIDOS} partidos)": "last_n",
-    "Promedio (partidos seleccionados)": "mean",
+    "Promedio (todos los partidos)": "mean",
     "Percentil 70 (más peso a lo reciente)": "p70",
 }
 LOAD_VALUES = [0.8, 0.9, 1.0, 1.1, 1.2, 1.3]
@@ -119,38 +120,17 @@ def render_match_pct_controls(sessions: list[str], is_peak: bool) -> dict[str, i
     return values
 
 
-def _match_catalog(df: pd.DataFrame, match_date: date) -> dict[date, str]:
-    """Matches played up to ``match_date``, newest first: {date: label}."""
-    matches = filtrar_solo_partidos(df)
-    if matches.empty or "date" not in matches.columns:
-        return {}
-    catalog = pd.DataFrame(
-        {
-            "date": pd.to_datetime(matches["date"], errors="coerce", format="mixed").dt.date,
-            "session": (
-                matches["session"].astype(str).str.strip()
-                if "session" in matches.columns
-                else "Partido"
-            ),
-        }
-    ).dropna(subset=["date"])
-    catalog = catalog[catalog["date"] <= match_date]
-    sessions = catalog.groupby("date")["session"].first().sort_index(ascending=False)
-    return {day: f"{session} · {day:%d/%m/%y}" for day, session in sessions.items()}
-
-
 def _reference_frame(
     df: pd.DataFrame,
     metric_column: str,
     statistic: str,
     match_date: date,
-    selected_dates: list[date],
 ) -> pd.DataFrame:
     """Calculate player references from full-match records only.
 
     Each player-match counts once: the 'Total' row is used, and halves are
-    only added up when a match has no 'Total' row for that player. Only
-    the selected matches played up to ``match_date`` are used.
+    only added up when a match has no 'Total' row for that player. Every
+    match played up to ``match_date`` is used.
     """
     empty = pd.DataFrame(columns=REFERENCE_COLUMNS)
     source = filtrar_solo_partidos(df)
@@ -180,7 +160,6 @@ def _reference_frame(
             **{column: "sum" for column in minute_columns},
         }
     )
-    source = source[source["date"].isin(selected_dates)]
     # Every squad player in the GPS data is listed, so players without
     # valid matches still get a (positional) reference.
     squad = df[["player", "position"]].dropna(subset=["player"]).drop_duplicates("player")
@@ -205,7 +184,7 @@ def _reference_rules_caption(is_peak: bool) -> str:
             f"{REFERENCIA_MINUTOS}' y los más largos no se reducen."
         )
     return (
-        "Referencia de partido: partidos seleccionados hasta la fecha MD. "
+        "Referencia de partido: todos los partidos (liga y amistosos) hasta la fecha MD. "
         f"{minutes_rule} Pico máximo = mejor partido "
         f"(⚠️ si tiene más de {REFERENCIA_PICO_ANTIGUO_DIAS} días). "
         f"Percentil 70: un partido de hace {REFERENCIA_VIDA_MEDIA_DIAS} días cuenta la mitad. "
@@ -213,59 +192,109 @@ def _reference_rules_caption(is_peak: bool) -> str:
     )
 
 
+MANUAL_TABLE_STATE = "prescription_manual_table"
+MANUAL_ERROR_STATE = "prescription_manual_error"
+
+
+def _manual_table() -> pd.DataFrame:
+    """Saved manual references, read from Google Drive once per app session."""
+    if MANUAL_TABLE_STATE not in st.session_state:
+        try:
+            st.session_state[MANUAL_TABLE_STATE] = manual_store.load_table()
+            st.session_state.pop(MANUAL_ERROR_STATE, None)
+        except manual_store.ManualReferencesError as error:
+            st.session_state[MANUAL_TABLE_STATE] = manual_store.empty_table()
+            st.session_state[MANUAL_ERROR_STATE] = str(error)
+    return st.session_state[MANUAL_TABLE_STATE]
+
+
+def _changed_values(
+    saved: dict[str, dict], players: pd.Series, values: pd.Series
+) -> dict[str, float | None]:
+    """Players whose manual value was typed, changed or deleted."""
+    changes: dict[str, float | None] = {}
+    for player, value in zip(players, values):
+        new = float(value) if pd.notna(value) else None
+        old = saved.get(player, {}).get("valor")
+        if (old is None) != (new is None) or (new is not None and abs(old - new) > 1e-9):
+            changes[player] = new
+    return changes
+
+
 def render_manual_references(
     references: pd.DataFrame, metric_column: str, unit: str
-) -> dict[str, float]:
+) -> dict[str, dict]:
     """Table to type a player's match reference by hand.
 
-    Values are kept per metric for the current app session only.
+    Values are saved automatically in Google Drive (one per player and
+    metric) and shared by the whole staff.
     """
-    store = st.session_state.setdefault("prescription_manual_references", {})
-    metric_store: dict[str, float] = store.setdefault(metric_column, {})
+    saved = manual_store.values_for_metric(_manual_table(), metric_column)
     manual_column = f"Referencia manual ({unit})"
-    with st.expander(
-        f"✏️ Ajuste manual de referencia ({len(metric_store)} activos)"
-        if metric_store
-        else "✏️ Ajuste manual de referencia"
-    ):
+    calculated_column = f"Referencia calculada ({unit})"
+    title = "✏️ Ajuste manual de referencia"
+    with st.expander(f"{title} ({len(saved)} activos)" if saved else title):
         st.caption(
             "Para nuevas incorporaciones, Return to Play o casos especiales. "
-            "Escribe la referencia de partido del jugador; deja la celda vacía para "
-            "usar la calculada. Se mantiene mientras la app esté abierta."
+            "Escribe la referencia de partido del jugador; borra la celda para volver "
+            "a la calculada. Se guarda automáticamente en Google Drive "
+            f"(europa/{manual_store.FOLDER_NAME}) y la ve todo el staff."
         )
+        if st.session_state.get(MANUAL_ERROR_STATE):
+            st.warning(
+                f"⚠️ {st.session_state[MANUAL_ERROR_STATE]} Mientras tanto, los valores "
+                "manuales solo se mantienen mientras la app esté abierta."
+            )
         table = pd.DataFrame(
             {
                 "Player": references["player"],
                 "Position": references["position"],
-                f"Referencia calculada ({unit})": pd.to_numeric(
+                calculated_column: pd.to_numeric(
                     references["baseline_target"], errors="coerce"
                 ).round(2),
-                manual_column: references["player"].map(metric_store).astype(float),
+                manual_column: references["player"]
+                .map(lambda player: saved.get(player, {}).get("valor"))
+                .astype(float),
+                "Guardado": references["player"].map(
+                    lambda player: f"{saved[player]['fecha']} · {saved[player]['usuario']}"
+                    if player in saved
+                    else ""
+                ),
             }
         )
         edited = st.data_editor(
             table,
             hide_index=True,
             use_container_width=True,
-            disabled=["Player", "Position", f"Referencia calculada ({unit})"],
+            disabled=["Player", "Position", calculated_column, "Guardado"],
             column_config={
                 manual_column: st.column_config.NumberColumn(min_value=0, step=1, format="%.2f"),
             },
             key=f"prescription_manual_references_{metric_column}",
         )
-    metric_store.clear()
-    metric_store.update(
-        {
-            player: float(value)
-            for player, value in zip(edited["Player"], edited[manual_column])
-            if pd.notna(value)
-        }
-    )
-    return dict(metric_store)
+
+    changes = _changed_values(saved, edited["Player"], edited[manual_column])
+    if changes:
+        user = st.session_state.get("usuario") or st.session_state.get("usuario_login") or "staff"
+        try:
+            st.session_state[MANUAL_TABLE_STATE] = manual_store.save_changes(
+                metric_column, changes, user
+            )
+            st.session_state.pop(MANUAL_ERROR_STATE, None)
+            st.toast("✏️ Referencia manual guardada en Drive")
+        except manual_store.ManualReferencesError as error:
+            # Keep the change for this session so the work is not lost.
+            st.session_state[MANUAL_TABLE_STATE] = manual_store.apply_changes(
+                _manual_table(), metric_column, changes, user
+            )
+            st.session_state[MANUAL_ERROR_STATE] = f"No se pudo guardar en Drive: {error}"
+            st.error(f"❌ {st.session_state[MANUAL_ERROR_STATE]}")
+        saved = manual_store.values_for_metric(st.session_state[MANUAL_TABLE_STATE], metric_column)
+    return saved
 
 
 def apply_manual_references(
-    references: pd.DataFrame, manual_references: dict[str, float]
+    references: pd.DataFrame, manual_references: dict[str, dict]
 ) -> pd.DataFrame:
     """Replace calculated references with the values typed by the staff."""
     if not manual_references or references.empty:
@@ -273,13 +302,14 @@ def apply_manual_references(
     references = references.copy()
     for index, player in references["player"].items():
         if player in manual_references:
+            entry = manual_references[player]
             calculated = references.at[index, "baseline_target"]
-            references.at[index, "baseline_target"] = manual_references[player]
+            references.at[index, "baseline_target"] = entry["valor"]
             references.at[index, "source"] = "manual"
+            who = " · ".join(part for part in (entry.get("fecha"), entry.get("usuario")) if part)
+            label = f"✏️ Manual · {who}" if who else "✏️ Manual"
             references.at[index, "origin"] = (
-                f"✏️ Manual (calculada: {calculated:.0f})"
-                if pd.notna(calculated)
-                else "✏️ Manual"
+                f"{label} (calculada: {calculated:.0f})" if pd.notna(calculated) else label
             )
     return references
 
@@ -297,13 +327,19 @@ def _status(compliance_pct: float) -> tuple[str, str]:
     return "Sobre-óptimo", "🔴"
 
 
-def _semaforo_cell(prescribed: float, actual: float) -> str:
+def _format_load(value: float, unit: str) -> str:
+    return f"{value:.1f} {unit}" if unit == "km/h" else f"{value:.0f} {unit}"
+
+
+def _semaforo_cell(prescribed: float, actual: float, unit: str) -> str:
+    """'🟢 95% · 612 m': compliance vs. the session target and the real GPS load."""
     if pd.isna(actual):
         return "⚪ Sin datos"
+    real = _format_load(actual, unit)
     if pd.isna(prescribed) or prescribed <= 0:
-        return "— Sin objetivo"
+        return f"— {real}"
     compliance = actual / prescribed * 100
-    return f"{_status(compliance)[1]} {compliance:.0f}%"
+    return f"{_status(compliance)[1]} {compliance:.0f}% · {real}"
 
 
 def main() -> None:
@@ -393,18 +429,6 @@ def main() -> None:
     )
 
     has_data = isinstance(df, pd.DataFrame) and not df.empty
-    match_catalog = _match_catalog(df, match_date) if has_data else {}
-    selected_dates = st.multiselect(
-        "Partidos de referencia",
-        options=list(match_catalog),
-        default=list(match_catalog),
-        format_func=match_catalog.get,
-        key=f"prescription_reference_matches_{match_date}",
-        help=(
-            "Partidos usados para calcular la referencia (todos por defecto). "
-            "Quita amistosos o partidos con datos dudosos si es necesario."
-        ),
-    )
 
     st.subheader("Carga de cada sesión respecto al partido")
     match_pct = render_match_pct_controls(sessions, is_peak=is_max_speed)
@@ -415,10 +439,8 @@ def main() -> None:
         st.info("Carga los datos GPS desde la página principal para calcular las referencias.")
         references = pd.DataFrame(columns=REFERENCE_COLUMNS)
     else:
-        if match_catalog and not selected_dates:
-            st.warning("Selecciona al menos un partido de referencia.")
         references = _reference_frame(
-            df, metric_column, STATISTIC_OPTIONS[statistic_label], match_date, selected_dates
+            df, metric_column, STATISTIC_OPTIONS[statistic_label], match_date
         )
         if references.empty:
             st.warning(
@@ -468,7 +490,9 @@ def main() -> None:
             STATISTIC_OPTIONS.get(statistic_label, "max"),
             f"{load_multiplier:.1f}",
             str(match_date),
-            str(hash((tuple(sorted(selected_dates)), tuple(sorted(manual_references.items()))))),
+            str(hash(tuple(sorted(
+                (player, entry["valor"]) for player, entry in manual_references.items()
+            )))),
             *(f"{session}{match_pct[session]}" for session in sessions),
         ]
     )
@@ -509,72 +533,18 @@ def main() -> None:
         }
     )
     prescribed = edited[sessions].astype(float)
-    reference = edited[reference_column].astype(float).where(lambda s: s > 0)
 
     st.subheader("Semáforo de cumplimiento por sesión")
     st.caption(
-        "Carga real GPS / objetivo prescrito de la sesión. "
-        "🟢 90–110% · 🟡 < 90% · 🔴 > 110% · ⚪ sin registro GPS ese día."
+        f"% = carga real GPS / objetivo prescrito de la sesión, seguido de la carga real en {unit}. "
+        "🟢 90–110% · 🟡 < 90% · 🔴 > 110% · ⚪ sin registro GPS ese día · — sin objetivo."
     )
     semaforo = pd.DataFrame({"Player": edited["Player"]})
     for session in sessions:
-        semaforo[session] = [
-            _semaforo_cell(p, a) for p, a in zip(prescribed[session], actual[session])
+        semaforo[f"{session} ({session_dates[session]:%d/%m})"] = [
+            _semaforo_cell(p, a, unit) for p, a in zip(prescribed[session], actual[session])
         ]
     st.dataframe(semaforo, hide_index=True, use_container_width=True)
-
-    st.subheader("Carga real respecto al partido")
-    st.caption(
-        "Carga GPS de cada sesión como % de la referencia de partido del jugador "
-        "(partido = 100%). Entre paréntesis, el % prescrito."
-    )
-    real_vs_match = pd.DataFrame({"Player": edited["Player"]})
-    for session in sessions:
-        real_pct = actual[session].div(reference).mul(100)
-        prescribed_pct = prescribed[session].div(reference).mul(100)
-        real_vs_match[session] = [
-            "—" if pd.isna(r) else f"{r:.0f}% ({p:.0f}%)" if pd.notna(p) else f"{r:.0f}%"
-            for r, p in zip(real_pct, prescribed_pct)
-        ]
-    st.dataframe(real_vs_match, hide_index=True, use_container_width=True)
-
-    with st.expander("📋 Detalle por sesión"):
-        detail = []
-        for index, row in edited.iterrows():
-            for session in sessions:
-                p, a, ref = prescribed.at[index, session], actual.at[index, session], reference.at[index]
-                compliance = a / p * 100 if pd.notna(a) and p > 0 else float("nan")
-                if pd.isna(a):
-                    estado = "Sin datos"
-                elif not p > 0:
-                    estado = "Sin objetivo"
-                else:
-                    estado = _status(compliance)[0]
-                detail.append(
-                    {
-                        "Player": row["Player"],
-                        "Sesión": session,
-                        "Fecha": session_dates[session].strftime("%d/%m/%Y"),
-                        f"Prescrito ({unit})": p,
-                        f"Real GPS ({unit})": a,
-                        "Prescrito (% partido)": p / ref * 100 if pd.notna(ref) else float("nan"),
-                        "Real (% partido)": a / ref * 100 if pd.notna(ref) else float("nan"),
-                        "% Cumplimiento": compliance,
-                        "Estado": estado,
-                    }
-                )
-        st.dataframe(
-            pd.DataFrame(detail),
-            hide_index=True,
-            use_container_width=True,
-            column_config={
-                f"Prescrito ({unit})": st.column_config.NumberColumn(format="%.1f"),
-                f"Real GPS ({unit})": st.column_config.NumberColumn(format="%.1f"),
-                "Prescrito (% partido)": st.column_config.NumberColumn(format="%.0f%%"),
-                "Real (% partido)": st.column_config.NumberColumn(format="%.0f%%"),
-                "% Cumplimiento": st.column_config.NumberColumn(format="%.0f%%"),
-            },
-        )
 
 
 if __name__ == "__main__":
